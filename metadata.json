@@ -1,0 +1,5 @@
+{
+  "name": "CSI CMS - Church Management System",
+  "description": "A comprehensive Church Management Software for Indian churches with Tamil and English support, featuring member management, financial tracking, detailed reporting, and live Supabase cloud sync.",
+  "requestFramePermissions": []
+}
