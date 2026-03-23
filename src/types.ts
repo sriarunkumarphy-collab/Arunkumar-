@@ -6,6 +6,8 @@ export interface User {
   role: Role;
   name: string;
   email?: string;
+  church_id?: number;
+  church_name?: string;
 }
 
 export interface Member {
@@ -17,9 +19,13 @@ export interface Member {
   email: string;
   address: string;
   family_details: string;
-  membership_type: 'regular' | 'visitor' | 'life';
+  membership_type: 'regular' | 'visitor' | 'life' | 'pastor_family';
   joined_date: string;
   status: 'active' | 'inactive';
+  dob?: string;
+  marital_status?: 'married' | 'unmarried';
+  anniversary_date?: string;
+  spouse_name?: string;
 }
 
 export interface Transaction {
@@ -39,6 +45,7 @@ export interface Transaction {
   notes?: string;
   sub_start_date?: string;
   sub_end_date?: string;
+  correction_count?: number;
 }
 
 export interface Settings {
@@ -81,6 +88,17 @@ export interface TopContributor {
   member_code: string;
   total_contribution: number;
   transaction_count: number;
+}
+
+export interface Correction {
+  id: number;
+  correction_no: string;
+  ref_invoice_no: string;
+  type: 'income' | 'expense';
+  amount: number;
+  reason: string;
+  created_at: string;
+  created_by: string;
 }
 
 export type Language = 'en' | 'ta';

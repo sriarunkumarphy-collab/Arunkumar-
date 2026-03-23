@@ -7,6 +7,8 @@ if (!supabaseUrl || !supabaseAnonKey) {
   console.warn('Supabase URL or Anon Key is missing. Supabase integration will be disabled.');
 }
 
+export const isSupabaseConfigured = !!supabaseUrl && !supabaseUrl.includes('placeholder.supabase.co');
+
 export const supabase = createClient(
   supabaseUrl || 'https://placeholder.supabase.co',
   supabaseAnonKey || 'placeholder'

@@ -7,16 +7,34 @@ import nodemailer from "nodemailer";
 
 const db = new Database("church.db");
 db.exec("PRAGMA foreign_keys = ON;");
+db.exec("PRAGMA journal_mode = WAL;");
+db.exec("PRAGMA synchronous = NORMAL;");
 
 // Initialize Database Schema
 db.exec(`
+  CREATE TABLE IF NOT EXISTS churches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    location TEXT,
+    admin_name TEXT,
+    admin_email TEXT UNIQUE,
+    phone TEXT,
+    status TEXT DEFAULT 'active', -- active, inactive
+    plan TEXT DEFAULT 'basic', -- basic, premium
+    expiry_date TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE,
     password TEXT,
     role TEXT, -- super_admin, pastor, accountant, staff
     name TEXT,
-    email TEXT
+    email TEXT,
+    church_id INTEGER,
+    status TEXT DEFAULT 'active',
+    FOREIGN KEY(church_id) REFERENCES churches(id) ON DELETE CASCADE
   );
 
   CREATE TABLE IF NOT EXISTS password_reset_otps (
@@ -24,12 +42,13 @@ db.exec(`
     user_id INTEGER,
     otp TEXT,
     expires_at DATETIME,
-    FOREIGN KEY(user_id) REFERENCES users(id)
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
   );
 
   CREATE TABLE IF NOT EXISTS members (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    member_code TEXT UNIQUE,
+    church_id INTEGER,
+    member_code TEXT,
     name TEXT,
     tamil_name TEXT,
     phone TEXT,
@@ -38,12 +57,19 @@ db.exec(`
     family_details TEXT,
     membership_type TEXT, -- regular, visitor, life
     joined_date TEXT,
-    status TEXT DEFAULT 'active'
+    status TEXT DEFAULT 'active',
+    dob TEXT,
+    marital_status TEXT DEFAULT 'unmarried', -- married, unmarried
+    anniversary_date TEXT,
+    spouse_name TEXT,
+    FOREIGN KEY(church_id) REFERENCES churches(id) ON DELETE CASCADE,
+    UNIQUE(church_id, member_code)
   );
 
   CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    invoice_no TEXT UNIQUE,
+    church_id INTEGER,
+    invoice_no TEXT,
     type TEXT, -- income, expense
     category TEXT, -- offering, tithe, event, book_sale, maintenance, salary, utility, etc.
     amount REAL,
@@ -55,11 +81,71 @@ db.exec(`
     gst_amount REAL DEFAULT 0,
     bill_url TEXT,
     notes TEXT,
-    FOREIGN KEY(member_id) REFERENCES members(id)
+    FOREIGN KEY(church_id) REFERENCES churches(id) ON DELETE CASCADE,
+    FOREIGN KEY(member_id) REFERENCES members(id) ON DELETE SET NULL,
+    UNIQUE(church_id, invoice_no)
   );
 
+  CREATE INDEX IF NOT EXISTS idx_users_church_id ON users(church_id);
+  CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+  CREATE INDEX IF NOT EXISTS idx_transactions_church_id ON transactions(church_id);
+  CREATE INDEX IF NOT EXISTS idx_transactions_type ON transactions(type);
+`);
+
+// Migration: Add invoice_seq to transactions
+try {
+  db.prepare("ALTER TABLE transactions ADD COLUMN invoice_seq INTEGER").run();
+} catch (e) {}
+
+// Cleanup Migration: Populate invoice_seq and fix numbering only if needed
+try {
+  const needsFix = db.prepare("SELECT COUNT(*) as count FROM transactions WHERE invoice_seq IS NULL").get() as { count: number };
+  if (needsFix.count > 0) {
+    const churches = db.prepare("SELECT id FROM churches").all() as { id: number }[];
+    for (const church of churches) {
+      for (const type of ['income', 'expense']) {
+        const prefix = type === 'income' ? 'INC ' : 'EXP ';
+        const txs = db.prepare("SELECT id, invoice_no FROM transactions WHERE church_id = ? AND type = ? ORDER BY id ASC").all(church.id, type) as { id: number, invoice_no: string }[];
+        
+        let currentSeq = 1;
+        for (const tx of txs) {
+          const oldInvoiceNo = tx.invoice_no;
+          // Try to extract sequence from existing invoice_no if it matches the prefix
+          let seq = currentSeq;
+          if (oldInvoiceNo && oldInvoiceNo.startsWith(prefix)) {
+            const num = parseInt(oldInvoiceNo.replace(prefix, ''));
+            if (!isNaN(num)) seq = num;
+          }
+          
+          const newInvoiceNo = `${prefix}${seq}`;
+          
+          // Update transaction
+          db.prepare("UPDATE transactions SET invoice_no = ?, invoice_seq = ? WHERE id = ?").run(newInvoiceNo, seq, tx.id);
+          
+          // Update corrections that reference this invoice
+          if (oldInvoiceNo !== newInvoiceNo) {
+            db.prepare("UPDATE corrections SET ref_invoice_no = ? WHERE ref_invoice_no = ? AND church_id = ?").run(newInvoiceNo, oldInvoiceNo, church.id);
+          }
+          
+          // If we are assigning new sequences, we should keep track of the max
+          if (seq >= currentSeq) {
+            currentSeq = seq + 1;
+          } else {
+            currentSeq++;
+          }
+        }
+      }
+    }
+    console.log("Invoice sequence migration completed.");
+  }
+} catch (e) {
+  console.error("Cleanup migration failed:", e);
+}
+
+db.exec(`
   CREATE TABLE IF NOT EXISTS subscriptions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    church_id INTEGER,
     member_id INTEGER,
     start_date TEXT,
     end_date TEXT,
@@ -67,17 +153,22 @@ db.exec(`
     status TEXT, -- paid, pending
     last_reminder_date TEXT,
     transaction_id INTEGER,
-    FOREIGN KEY(member_id) REFERENCES members(id),
+    FOREIGN KEY(church_id) REFERENCES churches(id) ON DELETE CASCADE,
+    FOREIGN KEY(member_id) REFERENCES members(id) ON DELETE CASCADE,
     FOREIGN KEY(transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
   );
 
   CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT
+    church_id INTEGER,
+    key TEXT,
+    value TEXT,
+    PRIMARY KEY (church_id, key),
+    FOREIGN KEY(church_id) REFERENCES churches(id) ON DELETE CASCADE
   );
 
   CREATE TABLE IF NOT EXISTS church_notes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    church_id INTEGER,
     category TEXT, -- event, prayer, auction, materials
     content TEXT,
     user_name TEXT,
@@ -86,19 +177,159 @@ db.exec(`
     date TEXT,
     amount REAL DEFAULT 0,
     status TEXT DEFAULT 'pending',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(church_id) REFERENCES churches(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS corrections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    church_id INTEGER,
+    correction_no TEXT,
+    ref_invoice_no TEXT,
+    type TEXT, -- income, expense
+    amount REAL,
+    reason TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_by TEXT,
+    FOREIGN KEY(church_id) REFERENCES churches(id) ON DELETE CASCADE,
+    UNIQUE(church_id, correction_no)
   );
 `);
 
-// Migration: Ensure status column exists in members table
+// Create indexes for performance
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_members_church_id ON members(church_id);
+  CREATE INDEX IF NOT EXISTS idx_transactions_church_id ON transactions(church_id);
+  CREATE INDEX IF NOT EXISTS idx_transactions_type ON transactions(type);
+  CREATE INDEX IF NOT EXISTS idx_transactions_church_type_amount ON transactions(church_id, type, amount);
+  CREATE INDEX IF NOT EXISTS idx_subscriptions_church_id ON subscriptions(church_id);
+  CREATE INDEX IF NOT EXISTS idx_church_notes_church_id ON church_notes(church_id);
+  CREATE INDEX IF NOT EXISTS idx_corrections_church_id ON corrections(church_id);
+  CREATE INDEX IF NOT EXISTS idx_users_church_id ON users(church_id);
+`);
+
+// Migration: Update member codes from CSIM to M
 try {
-  db.prepare("ALTER TABLE members ADD COLUMN status TEXT DEFAULT 'active'").run();
-  console.log("Added status column to members table.");
+  const membersTableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='members'").get();
+  if (membersTableExists) {
+    const csimMembers = db.prepare("SELECT id, member_code FROM members WHERE member_code LIKE 'CSIM%'").all() as { id: number, member_code: string }[];
+    for (const m of csimMembers) {
+      if (m.member_code) {
+        const newCode = m.member_code.replace('CSIM', 'M');
+        try {
+          db.prepare("UPDATE members SET member_code = ? WHERE id = ?").run(newCode, m.id);
+        } catch (err) {
+          // Ignore if unique constraint fails
+        }
+      }
+    }
+  }
+} catch (e) {
+  console.error("Migration error (CSIM to M):", e);
+}
+
+// Migration: Multi-Church SaaS
+try {
+  db.prepare("ALTER TABLE users ADD COLUMN church_id INTEGER").run();
+} catch (e) {}
+try {
+  db.prepare("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'active'").run();
+} catch (e) {}
+try {
+  db.prepare("ALTER TABLE users ADD COLUMN role TEXT").run();
+} catch (e) {}
+try {
+  db.prepare("ALTER TABLE users ADD COLUMN name TEXT").run();
+} catch (e) {}
+try {
+  db.prepare("ALTER TABLE users ADD COLUMN email TEXT").run();
+} catch (e) {}
+try {
+  db.prepare("ALTER TABLE members ADD COLUMN church_id INTEGER").run();
+} catch (e) {}
+try {
+  db.prepare("ALTER TABLE transactions ADD COLUMN church_id INTEGER").run();
+} catch (e) {}
+try {
+  db.prepare("ALTER TABLE subscriptions ADD COLUMN church_id INTEGER").run();
+} catch (e) {}
+try {
+  db.prepare("ALTER TABLE church_notes ADD COLUMN church_id INTEGER").run();
+} catch (e) {}
+try {
+  db.prepare("ALTER TABLE corrections ADD COLUMN church_id INTEGER").run();
+} catch (e) {}
+
+// Seed default church if none exists
+const churchExists = db.prepare("SELECT * FROM churches WHERE id = 1").get();
+if (!churchExists) {
+  db.prepare("INSERT INTO churches (id, name, location, admin_name, admin_email, status) VALUES (?, ?, ?, ?, ?, ?)").run(
+    1,
+    "C.S.I W.J HATCH MEMORIAL CHURCH",
+    "Chennai, Tamil Nadu",
+    "Admin",
+    "sriarunkumarphy@gmail.com",
+    "active"
+  );
+  
+  // Assign existing data to default church
+  try {
+    db.prepare("UPDATE users SET church_id = 1 WHERE role != 'super_admin' OR role IS NULL").run();
+    db.prepare("UPDATE members SET church_id = 1 WHERE church_id IS NULL").run();
+    db.prepare("UPDATE transactions SET church_id = 1 WHERE church_id IS NULL").run();
+    db.prepare("UPDATE subscriptions SET church_id = 1 WHERE church_id IS NULL").run();
+    db.prepare("UPDATE church_notes SET church_id = 1 WHERE church_id IS NULL").run();
+    db.prepare("UPDATE corrections SET church_id = 1 WHERE church_id IS NULL").run();
+  } catch (e) {
+    console.error("Error migrating data to default church:", e);
+  }
+  
+  // Migrate settings
+  const oldSettings = db.prepare("SELECT * FROM settings WHERE church_id IS NULL").all() as any[];
+  for (const s of oldSettings) {
+    try {
+      db.prepare("INSERT INTO settings (church_id, key, value) VALUES (1, ?, ?)").run(s.key, s.value);
+    } catch (e) {}
+  }
+}
+
+// Migration: Ensure dob column exists in members table
+try {
+  db.prepare("ALTER TABLE members ADD COLUMN dob TEXT").run();
+  console.log("Added dob column to members table.");
 } catch (e: any) {
   if (e.message.includes("duplicate column name")) {
-    console.log("Status column already exists in members table.");
-  } else {
-    console.error("Migration error:", e.message);
+    console.log("dob column already exists in members table.");
+  }
+}
+
+// Migration: Ensure marital_status column exists in members table
+try {
+  db.prepare("ALTER TABLE members ADD COLUMN marital_status TEXT DEFAULT 'unmarried'").run();
+  console.log("Added marital_status column to members table.");
+} catch (e: any) {
+  if (e.message.includes("duplicate column name")) {
+    console.log("marital_status column already exists in members table.");
+  }
+}
+
+// Migration: Ensure anniversary_date column exists in members table
+try {
+  db.prepare("ALTER TABLE members ADD COLUMN anniversary_date TEXT").run();
+  console.log("Added anniversary_date column to members table.");
+} catch (e: any) {
+  if (e.message.includes("duplicate column name")) {
+    console.log("anniversary_date column already exists in members table.");
+  }
+}
+
+// Migration: Ensure spouse_name column exists in members table
+try {
+  db.prepare("ALTER TABLE members ADD COLUMN spouse_name TEXT").run();
+  console.log("Added spouse_name column to members table.");
+} catch (e: any) {
+  if (e.message.includes("duplicate column name")) {
+    console.log("spouse_name column already exists in members table.");
   }
 }
 
@@ -128,40 +359,46 @@ try {
   console.log("Added status column to church_notes table.");
 } catch (e: any) {}
 
-// Migration: Ensure email column exists in users table
-try {
-  db.prepare("ALTER TABLE users ADD COLUMN email TEXT").run();
-  console.log("Added email column to users table.");
-} catch (e: any) {
-  if (e.message.includes("duplicate column name")) {
-    console.log("Email column already exists in users table.");
-  } else {
-    console.error("Migration error:", e.message);
-  }
-}
-
 // Seed default user if not exists
 const adminExists = db.prepare("SELECT * FROM users WHERE username = ?").get("admin") as any;
 if (!adminExists) {
   console.log("Seeding default admin user...");
-  db.prepare("INSERT INTO users (username, password, role, name, email) VALUES (?, ?, ?, ?, ?)").run(
+  db.prepare("INSERT INTO users (username, password, role, name, email, status) VALUES (?, ?, ?, ?, ?, ?)").run(
     "admin",
     "admin123", // In a real app, use bcrypt
     "super_admin",
     "Super Admin",
-    "sriarunkumarphy@gmail.com"
+    "sriarunkumarphy@gmail.com",
+    "active"
   );
   console.log("Default admin user seeded.");
 } else {
-  console.log("Admin user already exists. Ensuring password is 'admin123' and email is updated.");
-  db.prepare("UPDATE users SET password = ?, email = ? WHERE username = ?").run(
+  console.log("Admin user already exists. Ensuring password is 'admin123', role is 'super_admin', status is 'active', and email is updated.");
+  db.prepare("UPDATE users SET password = ?, email = ?, role = ?, status = ? WHERE username = ?").run(
     "admin123",
     "sriarunkumarphy@gmail.com",
+    "super_admin",
+    "active",
     "admin"
   );
 }
 
-// Seed default settings
+// Seed default pastor for church 1
+const pastorExists = db.prepare("SELECT * FROM users WHERE username = ?").get("pastor") as any;
+if (!pastorExists) {
+  console.log("Seeding default pastor user for church 1...");
+  db.prepare("INSERT INTO users (username, password, role, name, email, church_id) VALUES (?, ?, ?, ?, ?, ?)").run(
+    "pastor",
+    "pastor123",
+    "pastor",
+    "Church Pastor",
+    "pastor@example.com",
+    1
+  );
+  console.log("Default pastor user seeded.");
+}
+
+// Seed default settings for church 1
 const settings = [
   { key: "church_name", value: "C.S.I W.J HATCH MEMORIAL CHURCH" },
   { key: "church_name_tamil", value: "C.S.I W.J ஹட்ச் மெமோரியல் சர்ச்" },
@@ -171,15 +408,49 @@ const settings = [
 ];
 
 for (const s of settings) {
-  const exists = db.prepare("SELECT * FROM settings WHERE key = ?").get(s.key);
+  const exists = db.prepare("SELECT * FROM settings WHERE church_id = 1 AND key = ?").get(s.key);
   if (!exists) {
-    db.prepare("INSERT INTO settings (key, value) VALUES (?, ?)").run(s.key, s.value);
+    db.prepare("INSERT INTO settings (church_id, key, value) VALUES (1, ?, ?)").run(s.key, s.value);
   }
 }
 
-// Update church name if it's still the old one
-db.prepare("UPDATE settings SET value = ? WHERE key = 'church_name' AND value = 'Arul Church'").run("C.S.I W.J HATCH MEMORIAL CHURCH");
-db.prepare("UPDATE settings SET value = ? WHERE key = 'church_name_tamil' AND value = 'அருள் தேவாலயம்'").run("C.S.I W.J ஹட்ச் மெமோரியல் சர்ச்");
+// Update church name if it's still the old one for church 1
+try {
+  db.prepare("UPDATE settings SET value = ? WHERE church_id = 1 AND key = 'church_name' AND value = 'Arul Church'").run("C.S.I W.J HATCH MEMORIAL CHURCH");
+  db.prepare("UPDATE settings SET value = ? WHERE church_id = 1 AND key = 'church_name_tamil' AND value = 'அருள் தேவாலயம்'").run("C.S.I W.J ஹட்ச் மெமோரியல் சர்ச்");
+} catch (e) {}
+
+// Helper functions for ID validation
+const parseId = (id: any): number | null => {
+  if (id === "" || id === undefined || id === null || id === "null" || id === "undefined") return null;
+  const parsed = parseInt(id);
+  return isNaN(parsed) ? null : parsed;
+};
+
+const validateChurchId = (id: any, req?: any) => {
+  // Allow super_admin to bypass church_id check for super admin routes
+  if (req && req.headers['x-user-role'] === 'super_admin') {
+    return parseId(id) || 0; // Return the ID if provided, or 0 as a placeholder
+  }
+  const parsed = parseId(id);
+  if (parsed === null) return null;
+  const exists = db.prepare("SELECT 1 FROM churches WHERE id = ?").get(parsed);
+  return exists ? parsed : null;
+};
+
+const validateMemberId = (id: any, churchId: number) => {
+  const parsed = parseId(id);
+  if (parsed === null) return null;
+  const exists = db.prepare("SELECT 1 FROM members WHERE id = ? AND church_id = ?").get(parsed, churchId);
+  return exists ? parsed : null;
+};
+
+const validateTransactionId = (id: any, churchId: number) => {
+  const parsed = parseId(id);
+  if (parsed === null) return null;
+  const exists = db.prepare("SELECT 1 FROM transactions WHERE id = ? AND church_id = ?").get(parsed, churchId);
+  return exists ? parsed : null;
+};
 
 async function startServer() {
   const app = express();
@@ -196,24 +467,78 @@ async function startServer() {
   app.use(express.json());
 
   // API Routes
-  app.post("/api/login", (req, res) => {
-    const { username, password } = req.body;
-    console.log(`Login attempt for username: ${username}, password: ${password}`);
-    
+  app.get("/api/health", (req, res) => {
     try {
-      const user = db.prepare("SELECT * FROM users WHERE username = ? AND password = ?").get(username, password);
+      db.prepare("SELECT 1").get();
+      res.json({ status: "ok", database: "connected", timestamp: new Date().toISOString() });
+    } catch (error: any) {
+      console.error("Health check database error:", error);
+      res.status(500).json({ status: "error", message: error.message });
+    }
+  });
+
+  app.post("/api/login", (req, res) => {
+    const { username: rawUsername, password: rawPassword } = req.body;
+    const username = rawUsername?.trim();
+    const password = rawPassword?.trim();
+    console.log(`[${new Date().toISOString()}] Login attempt: username="${username}"`);
+    
+    if (!username || !password) {
+      console.log(`[${new Date().toISOString()}] Login failed: Missing credentials`);
+      return res.status(400).json({ success: false, message: "Username and password are required" });
+    }
+
+    try {
+      const user = db.prepare("SELECT * FROM users WHERE (username = ? OR email = ?) AND password = ?").get(username, username, password) as any;
       if (user) {
-        console.log(`Login successful for: ${username}`);
-        res.json({ success: true, user: { id: user.id, username: user.username, role: user.role, name: user.name, email: user.email } });
+        if (user.status === 'inactive') {
+          console.log(`[${new Date().toISOString()}] Login failed: User "${username}" is inactive`);
+          return res.status(401).json({ success: false, message: "Account is inactive" });
+        }
+        
+        let church = null;
+        if (user.church_id) {
+          church = db.prepare("SELECT * FROM churches WHERE id = ?").get(user.church_id);
+          if (church && (church as any).status === 'inactive') {
+            console.log(`[${new Date().toISOString()}] Login failed: Church for user "${username}" is inactive`);
+            return res.status(401).json({ success: false, message: "Church account is inactive" });
+          }
+        }
+
+        const matchType = user.username === username ? 'username' : 'email';
+        console.log(`[${new Date().toISOString()}] Login success: user="${user.username}" (matched via ${matchType}), role="${user.role}"`);
+        res.json({ 
+          success: true, 
+          user: { 
+            id: user.id, 
+            username: user.username, 
+            role: user.role, 
+            name: user.name, 
+            email: user.email,
+            church_id: user.church_id,
+            church_name: church ? (church as any).name : null
+          } 
+        });
       } else {
-        console.log(`Login failed for: ${username} - Invalid credentials`);
-        res.status(401).json({ success: false, message: "Invalid credentials" });
+        // Debug: check if user exists at all
+        const userOnly = db.prepare("SELECT id, username, role, status, email FROM users WHERE username = ? OR email = ?").get(username, username) as any;
+        let debugMsg = "Invalid credentials";
+        if (userOnly) {
+          const foundVia = userOnly.username === username ? 'username' : 'email';
+          debugMsg = `Invalid password for user ${userOnly.username} (Found via ${foundVia}, Role: ${userOnly.role}, Status: ${userOnly.status})`;
+        } else {
+          debugMsg = `User "${username}" not found in database (checked username and email)`;
+        }
+        console.log(`[${new Date().toISOString()}] Login failed: ${debugMsg}`);
+        res.status(401).json({ success: false, message: debugMsg });
       }
     } catch (error: any) {
-      console.error("Database error during login:", error);
+      console.error(`[${new Date().toISOString()}] Login error:`, error);
       res.status(500).json({ success: false, message: "Database error", error: error.message });
     }
   });
+
+  // Super Admin APIs moved to consolidated section below
 
   // Forgot Password API
   app.post("/api/forgot-password", async (req, res) => {
@@ -364,128 +689,254 @@ async function startServer() {
 
   // Members API
   app.get("/api/members", (req, res) => {
-    console.log("GET /api/members hit");
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
     try {
-      const members = db.prepare("SELECT * FROM members WHERE status = 'active' OR status IS NULL").all();
+      const members = db.prepare("SELECT * FROM members WHERE (status = 'active' OR status IS NULL) AND church_id = ?").all(churchId);
       res.json(members);
     } catch (error: any) {
-      console.error("Error fetching members:", error);
-      res.status(500).json({ success: false, message: "Database error", error: error.message });
+      res.status(500).json({ success: false, message: error.message });
     }
   });
 
   app.post("/api/members", (req, res) => {
-    console.log("POST /api/members hit");
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
     try {
-      const { name, tamil_name, phone, email, address, family_details, membership_type, joined_date } = req.body;
+      const { name, tamil_name, phone, email, address, family_details, membership_type, joined_date, dob, marital_status, anniversary_date, spouse_name } = req.body;
       
-      // Generate member_code: CSIM0001, CSIM0002, etc.
-      const lastMember = db.prepare("SELECT member_code FROM members WHERE member_code LIKE 'CSIM%' ORDER BY id DESC LIMIT 1").get();
+      const lastMember = db.prepare("SELECT member_code FROM members WHERE (member_code LIKE 'CSIM%' OR member_code LIKE 'M%') AND church_id = ? ORDER BY id DESC LIMIT 1").get(churchId) as { member_code: string } | undefined;
       let nextNum = 1;
       if (lastMember && lastMember.member_code) {
-        const lastNum = parseInt(lastMember.member_code.replace('CSIM', ''));
-        if (!isNaN(lastNum)) {
-          nextNum = lastNum + 1;
-        }
+        const lastNum = parseInt(lastMember.member_code.replace('CSIM', '').replace('M', ''));
+        if (!isNaN(lastNum)) nextNum = lastNum + 1;
       }
-      const member_code = `CSIM${nextNum.toString().padStart(4, '0')}`;
+      const member_code = `M${nextNum}`;
 
       const result = db.prepare(`
-        INSERT INTO members (member_code, name, tamil_name, phone, email, address, family_details, membership_type, joined_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(member_code, name, tamil_name, phone, email, address, family_details, membership_type, joined_date);
+        INSERT INTO members (church_id, member_code, name, tamil_name, phone, email, address, family_details, membership_type, joined_date, dob, marital_status, anniversary_date, spouse_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(churchId, member_code, name, tamil_name, phone, email, address, family_details, membership_type, joined_date, dob, marital_status, anniversary_date, spouse_name);
       res.json({ success: true, id: result.lastInsertRowid, member_code });
     } catch (error: any) {
-      console.error("Error creating member:", error);
-      res.status(500).json({ success: false, message: "Database error", error: error.message });
+      res.status(500).json({ success: false, message: error.message });
     }
   });
 
   app.put("/api/members/:id", (req, res) => {
-    console.log(`PUT /api/members/${req.params.id} hit`);
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
     try {
-      const { name, tamil_name, phone, email, address, family_details, membership_type, joined_date } = req.body;
+      const { name, tamil_name, phone, email, address, family_details, membership_type, joined_date, dob, marital_status, anniversary_date, spouse_name } = req.body;
       db.prepare(`
         UPDATE members 
-        SET name = ?, tamil_name = ?, phone = ?, email = ?, address = ?, family_details = ?, membership_type = ?, joined_date = ?
-        WHERE id = ?
-      `).run(name, tamil_name, phone, email, address, family_details, membership_type, joined_date, req.params.id);
+        SET name = ?, tamil_name = ?, phone = ?, email = ?, address = ?, family_details = ?, membership_type = ?, joined_date = ?, dob = ?, marital_status = ?, anniversary_date = ?, spouse_name = ?
+        WHERE id = ? AND church_id = ?
+      `).run(name, tamil_name, phone, email, address, family_details, membership_type, joined_date, dob, marital_status, anniversary_date, spouse_name, req.params.id, churchId);
       res.json({ success: true });
     } catch (error: any) {
-      console.error("Error updating member:", error);
-      res.status(500).json({ success: false, message: "Database error", error: error.message });
+      res.status(500).json({ success: false, message: error.message });
     }
   });
 
   app.delete("/api/members/:id", (req, res) => {
     const { id } = req.params;
-    console.log(`DELETE /api/members/${id} hit`);
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
     try {
-      // Soft delete: set status to 'inactive'
-      const result = db.prepare("UPDATE members SET status = 'inactive' WHERE id = ?").run(id);
+      const result = db.prepare("UPDATE members SET status = 'inactive' WHERE id = ? AND church_id = ?").run(id, churchId);
       if (result.changes > 0) {
         res.json({ success: true });
       } else {
         res.status(404).json({ success: false, message: "Member not found" });
       }
     } catch (error: any) {
-      console.error("Error deleting member:", error);
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  app.get("/api/reminders", (req, res) => {
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
+    try {
+      const today = new Date();
+      const todayMonthDay = today.toISOString().slice(5, 10); // MM-DD
+      
+      const next7Days = [];
+      for (let i = 1; i <= 7; i++) {
+        const d = new Date(today);
+        d.setDate(today.getDate() + i);
+        next7Days.push(d.toISOString().slice(5, 10));
+      }
+
+      // Optimization: Filter in database using strftime
+      const todayBirthdays = db.prepare(`
+        SELECT * FROM members 
+        WHERE (status = 'active' OR status IS NULL) 
+        AND church_id = ? 
+        AND strftime('%m-%d', dob) = ?
+      `).all(churchId, todayMonthDay);
+
+      const todayAnniversaries = db.prepare(`
+        SELECT * FROM members 
+        WHERE (status = 'active' OR status IS NULL) 
+        AND church_id = ? 
+        AND marital_status = 'married' 
+        AND strftime('%m-%d', anniversary_date) = ?
+      `).all(churchId, todayMonthDay);
+
+      const upcomingBirthdays = db.prepare(`
+        SELECT * FROM members 
+        WHERE (status = 'active' OR status IS NULL) 
+        AND church_id = ? 
+        AND strftime('%m-%d', dob) IN (${next7Days.map(() => '?').join(',')})
+      `).all(churchId, ...next7Days);
+
+      const upcomingAnniversaries = db.prepare(`
+        SELECT * FROM members 
+        WHERE (status = 'active' OR status IS NULL) 
+        AND church_id = ? 
+        AND marital_status = 'married' 
+        AND strftime('%m-%d', anniversary_date) IN (${next7Days.map(() => '?').join(',')})
+      `).all(churchId, ...next7Days);
+
+      res.json({
+        today: {
+          birthdays: todayBirthdays,
+          anniversaries: todayAnniversaries
+        },
+        upcoming: {
+          birthdays: upcomingBirthdays,
+          anniversaries: upcomingAnniversaries
+        }
+      });
+    } catch (error: any) {
+      console.error("Error fetching reminders:", error);
       res.status(500).json({ success: false, message: "Database error", error: error.message });
     }
   });
 
   // Transactions API
-  app.get("/api/transactions", (req, res) => {
-    console.log("GET /api/transactions hit");
+  app.post("/api/transactions/renumber", (req, res) => {
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
+
     try {
-      const transactions = db.prepare(`
-        SELECT t.*, m.name as member_name, s.start_date as sub_start_date, s.end_date as sub_end_date
+      db.transaction(() => {
+        for (const type of ['income', 'expense']) {
+          const prefix = type === 'income' ? 'INC ' : 'EXP ';
+          // Order by date then id to ensure logical sequence
+          const txs = db.prepare("SELECT id, invoice_no FROM transactions WHERE church_id = ? AND type = ? ORDER BY date ASC, id ASC").all(churchId, type) as { id: number, invoice_no: string }[];
+          
+          // Phase 1: Move to temporary names to avoid unique constraint collisions
+          for (const tx of txs) {
+            db.prepare("UPDATE transactions SET invoice_no = ? WHERE id = ?").run(`TEMP_${tx.id}_${Date.now()}`, tx.id);
+          }
+
+          // Phase 2: Set final sequential numbers
+          let currentSeq = 1;
+          for (const tx of txs) {
+            const newInvoiceNo = `${prefix}${currentSeq}`;
+            const oldInvoiceNo = tx.invoice_no;
+            
+            db.prepare("UPDATE transactions SET invoice_no = ?, invoice_seq = ? WHERE id = ?").run(newInvoiceNo, currentSeq, tx.id);
+            
+            if (oldInvoiceNo !== newInvoiceNo) {
+              db.prepare("UPDATE corrections SET ref_invoice_no = ? WHERE ref_invoice_no = ? AND church_id = ?").run(newInvoiceNo, oldInvoiceNo, churchId);
+            }
+            
+            currentSeq++;
+          }
+        }
+      })();
+      res.json({ success: true, message: "Invoices renumbered successfully" });
+    } catch (error: any) {
+      console.error("Renumbering error:", error);
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  app.get("/api/transactions", (req, res) => {
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    const limit = req.query.limit ? parseInt(req.query.limit as string) : null;
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
+    try {
+      let query = `
+        SELECT t.*, m.name as member_name, s.start_date as sub_start_date, s.end_date as sub_end_date,
+        (SELECT COUNT(*) FROM corrections c WHERE c.ref_invoice_no = t.invoice_no AND c.church_id = t.church_id) as correction_count
         FROM transactions t 
         LEFT JOIN members m ON t.member_id = m.id
         LEFT JOIN subscriptions s ON t.id = s.transaction_id
+        WHERE t.church_id = ?
         ORDER BY t.date DESC
-      `).all();
+      `;
+      
+      if (limit) {
+        query += ` LIMIT ${limit}`;
+      }
+      
+      const transactions = db.prepare(query).all(churchId);
       res.json(transactions);
     } catch (error: any) {
-      console.error("Error fetching transactions:", error);
-      res.status(500).json({ success: false, message: "Database error", error: error.message });
+      res.status(500).json({ success: false, message: error.message });
     }
   });
 
   app.post("/api/transactions", (req, res) => {
-    console.log("POST /api/transactions hit");
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
+    
     try {
       const { type, category, amount, date, payment_mode, member_id, vendor_name, item_details, gst_amount, notes } = req.body;
       
-      let invoice_no;
-      if (type === "income") {
-        // Find the highest bill number
-        const lastIncome = db.prepare("SELECT invoice_no FROM transactions WHERE type = 'income' AND invoice_no LIKE 'Bill No %' ORDER BY id DESC LIMIT 1").get() as { invoice_no: string } | undefined;
-        let nextNum = 1;
-        if (lastIncome) {
-          const match = lastIncome.invoice_no.match(/Bill No (\d+)/);
-          if (match) {
-            nextNum = parseInt(match[1]) + 1;
-          }
-        }
-        invoice_no = `Bill No ${nextNum}`;
-      } else {
-        invoice_no = "EXP" + Date.now();
+      const finalMemberId = validateMemberId(member_id, churchId);
+      
+      if (category === 'subscriptions' && !finalMemberId) {
+        return res.status(400).json({ success: false, message: "Valid Member is required for subscriptions" });
       }
       
-      // Ensure member_id is null if not provided or empty string
-      const finalMemberId = (member_id === "" || member_id === undefined || member_id === null) ? null : member_id;
+      let invoice_no = req.body.invoice_no;
+      let invoice_seq = req.body.invoice_seq;
+      const prefix = type === 'income' ? 'INC ' : 'EXP ';
+      
+      if (!invoice_no) {
+        // Find the first available sequence number starting from 1
+        let nextNum = 1;
+        let unique = false;
+        while (!unique) {
+          invoice_no = `${prefix}${nextNum}`;
+          const exists = db.prepare("SELECT 1 FROM transactions WHERE invoice_no = ? AND church_id = ?").get(invoice_no, churchId);
+          if (!exists) {
+            unique = true;
+            invoice_seq = nextNum;
+          } else {
+            nextNum++;
+          }
+        }
+      } else if (!invoice_seq) {
+        // Extract sequence from manual invoice_no
+        const match = invoice_no.match(/\d+/);
+        invoice_seq = match ? parseInt(match[0]) : 0;
+      }
+      
       const finalAmount = parseFloat(amount) || 0;
       const finalGstAmount = parseFloat(gst_amount) || 0;
 
       const result = db.prepare(`
-        INSERT INTO transactions (invoice_no, type, category, amount, date, payment_mode, member_id, vendor_name, item_details, gst_amount, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(invoice_no, type, category, finalAmount, date, payment_mode, finalMemberId, vendor_name, item_details, finalGstAmount, notes);
+        INSERT INTO transactions (church_id, invoice_no, invoice_seq, type, category, amount, date, payment_mode, member_id, vendor_name, item_details, gst_amount, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(churchId, invoice_no, invoice_seq, type, category, finalAmount, date, payment_mode, finalMemberId, vendor_name, item_details, finalGstAmount, notes);
       
       const transactionId = result.lastInsertRowid;
 
-      // If category is subscriptions, also add to subscriptions table
       if (category === 'subscriptions' && finalMemberId) {
         const { start_date, end_date } = req.body;
         const sDate = start_date || date;
@@ -497,33 +948,59 @@ async function startServer() {
         }
         
         db.prepare(`
-          INSERT INTO subscriptions (member_id, start_date, end_date, amount, status, transaction_id)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(finalMemberId, sDate, eDate, finalAmount, 'paid', transactionId);
+          INSERT INTO subscriptions (church_id, member_id, start_date, end_date, amount, status, transaction_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(churchId, finalMemberId, sDate, eDate, finalAmount, 'paid', transactionId);
       }
 
       res.json({ success: true, id: transactionId, invoice_no });
     } catch (error: any) {
-      console.error("Error creating transaction:", error);
-      res.status(500).json({ success: false, message: "Database error", error: error.message });
+      res.status(500).json({ success: false, message: error.message });
     }
   });
 
   app.put("/api/transactions/:id", (req, res) => {
     const { id } = req.params;
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
+
     try {
-      const { category, amount, date, payment_mode, member_id, vendor_name, item_details, gst_amount, notes } = req.body;
-      const finalMemberId = (member_id === "" || member_id === undefined || member_id === null) ? null : member_id;
+      const { category, amount, date, payment_mode, member_id, vendor_name, item_details, gst_amount, notes, invoice_no, invoice_seq } = req.body;
+      const finalMemberId = validateMemberId(member_id, churchId);
+
+      if (category === 'subscriptions' && !finalMemberId) {
+        return res.status(400).json({ success: false, message: "Valid Member is required for subscriptions" });
+      }
+
       const finalAmount = parseFloat(amount) || 0;
       const finalGstAmount = parseFloat(gst_amount) || 0;
 
+      // Build dynamic update query to handle optional invoice_no/invoice_seq
+      const updateFields = [
+        "category = ?", "amount = ?", "date = ?", "payment_mode = ?", 
+        "member_id = ?", "vendor_name = ?", "item_details = ?", 
+        "gst_amount = ?", "notes = ?"
+      ];
+      const params = [category, finalAmount, date, payment_mode, finalMemberId, vendor_name, item_details, finalGstAmount, notes];
+
+      if (invoice_no !== undefined) {
+        updateFields.push("invoice_no = ?");
+        params.push(invoice_no);
+      }
+      if (invoice_seq !== undefined) {
+        updateFields.push("invoice_seq = ?");
+        params.push(invoice_seq);
+      }
+
+      params.push(id, churchId);
+
       db.prepare(`
         UPDATE transactions 
-        SET category = ?, amount = ?, date = ?, payment_mode = ?, member_id = ?, vendor_name = ?, item_details = ?, gst_amount = ?, notes = ?
-        WHERE id = ?
-      `).run(category, finalAmount, date, payment_mode, finalMemberId, vendor_name, item_details, finalGstAmount, notes, id);
+        SET ${updateFields.join(", ")}
+        WHERE id = ? AND church_id = ?
+      `).run(...params);
 
-      // Handle subscription sync
       if (category === 'subscriptions' && finalMemberId) {
         const { start_date, end_date } = req.body;
         const sDate = start_date || date;
@@ -534,140 +1011,217 @@ async function startServer() {
           eDate = d.toISOString().split('T')[0];
         }
 
-        // Check if subscription already exists for this transaction
-        const existingSub = db.prepare("SELECT id FROM subscriptions WHERE transaction_id = ?").get(id) as { id: number } | undefined;
+        const existingSub = db.prepare("SELECT id FROM subscriptions WHERE transaction_id = ? AND church_id = ?").get(id, churchId) as { id: number } | undefined;
         if (existingSub) {
           db.prepare(`
             UPDATE subscriptions 
             SET member_id = ?, start_date = ?, end_date = ?, amount = ?, status = 'paid'
-            WHERE id = ?
-          `).run(finalMemberId, sDate, eDate, finalAmount, existingSub.id);
+            WHERE id = ? AND church_id = ?
+          `).run(finalMemberId, sDate, eDate, finalAmount, existingSub.id, churchId);
         } else {
           db.prepare(`
-            INSERT INTO subscriptions (member_id, start_date, end_date, amount, status, transaction_id)
-            VALUES (?, ?, ?, ?, ?, ?)
-          `).run(finalMemberId, sDate, eDate, finalAmount, 'paid', id);
+            INSERT INTO subscriptions (church_id, member_id, start_date, end_date, amount, status, transaction_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(churchId, finalMemberId, sDate, eDate, finalAmount, 'paid', id);
         }
       } else {
-        // If category changed from subscriptions, delete the linked subscription
-        db.prepare("DELETE FROM subscriptions WHERE transaction_id = ?").run(id);
+        db.prepare("DELETE FROM subscriptions WHERE transaction_id = ? AND church_id = ?").run(id, churchId);
       }
 
       res.json({ success: true });
     } catch (error: any) {
-      console.error("Error updating transaction:", error);
-      res.status(500).json({ success: false, message: "Database error", error: error.message });
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  app.get("/api/corrections", (req, res) => {
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
+    try {
+      const corrections = db.prepare("SELECT * FROM corrections WHERE church_id = ? ORDER BY id DESC").all(churchId);
+      res.json(corrections);
+    } catch (error: any) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  app.delete("/api/transactions/:id", (req, res) => {
+    const { id } = req.params;
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
+    try {
+      db.prepare("DELETE FROM subscriptions WHERE transaction_id = ? AND church_id = ?").run(id, churchId);
+      db.prepare("DELETE FROM transactions WHERE id = ? AND church_id = ?").run(id, churchId);
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  app.post("/api/corrections", (req, res) => {
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
+    try {
+      const { ref_invoice_no, type, amount, reason, created_by } = req.body;
+      
+      const lastCorrection = db.prepare("SELECT correction_no FROM corrections WHERE church_id = ? ORDER BY id DESC LIMIT 1").get(churchId) as { correction_no: string } | undefined;
+      let nextNum = 1;
+      if (lastCorrection && lastCorrection.correction_no) {
+        const lastNum = parseInt(lastCorrection.correction_no.replace('CORR-', ''));
+        if (!isNaN(lastNum)) nextNum = lastNum + 1;
+      }
+      const correction_no = `CORR-${nextNum}`;
+
+      db.prepare(`
+        INSERT INTO corrections (church_id, correction_no, ref_invoice_no, type, amount, reason, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(churchId, correction_no, ref_invoice_no, type, amount, reason, created_by);
+      
+      res.json({ success: true, correction_no });
+    } catch (error: any) {
+      res.status(500).json({ success: false, message: error.message });
     }
   });
 
   // Subscriptions API
   app.get("/api/subscriptions", (req, res) => {
-    console.log("GET /api/subscriptions hit");
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
     try {
       const subscriptions = db.prepare(`
         SELECT s.*, m.name as member_name 
         FROM subscriptions s 
         JOIN members m ON s.member_id = m.id
+        WHERE s.church_id = ?
         ORDER BY s.end_date ASC
-      `).all();
+      `).all(churchId);
       res.json(subscriptions);
     } catch (error: any) {
-      console.error("Error fetching subscriptions:", error);
-      res.status(500).json({ success: false, message: "Database error", error: error.message });
+      res.status(500).json({ success: false, message: error.message });
     }
   });
 
   app.post("/api/subscriptions", (req, res) => {
-    console.log("POST /api/subscriptions hit");
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
+
     try {
-      const { member_id, start_date, end_date, amount, status } = req.body;
+      const { member_id, start_date, end_date, amount, status, transaction_id } = req.body;
+      const finalMemberId = validateMemberId(member_id, churchId);
+      const finalTransactionId = transaction_id ? validateTransactionId(transaction_id, churchId) : null;
+      
+      if (!finalMemberId) {
+        return res.status(400).json({ success: false, message: "Valid Member is required for subscriptions" });
+      }
+
       const result = db.prepare(`
-        INSERT INTO subscriptions (member_id, start_date, end_date, amount, status)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(member_id, start_date, end_date, amount, status);
+        INSERT INTO subscriptions (church_id, member_id, start_date, end_date, amount, status, transaction_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(churchId, finalMemberId, start_date, end_date, amount, status, finalTransactionId);
       res.json({ success: true, id: result.lastInsertRowid });
     } catch (error: any) {
-      console.error("Error creating subscription:", error);
-      res.status(500).json({ success: false, message: "Database error", error: error.message });
+      res.status(500).json({ success: false, message: error.message });
     }
   });
 
   app.put("/api/subscriptions/:id", (req, res) => {
-    console.log(`PUT /api/subscriptions/${req.params.id} hit`);
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
+
     try {
-      const { member_id, start_date, end_date, amount, status } = req.body;
+      const { member_id, start_date, end_date, amount, status, transaction_id } = req.body;
+      const finalMemberId = validateMemberId(member_id, churchId);
+      const finalTransactionId = transaction_id ? validateTransactionId(transaction_id, churchId) : null;
+
+      if (!finalMemberId) {
+        return res.status(400).json({ success: false, message: "Valid Member is required for subscriptions" });
+      }
+
       db.prepare(`
         UPDATE subscriptions 
-        SET member_id = ?, start_date = ?, end_date = ?, amount = ?, status = ?
-        WHERE id = ?
-      `).run(member_id, start_date, end_date, amount, status, req.params.id);
+        SET member_id = ?, start_date = ?, end_date = ?, amount = ?, status = ?, transaction_id = ?
+        WHERE id = ? AND church_id = ?
+      `).run(finalMemberId, start_date, end_date, amount, status, finalTransactionId, req.params.id, churchId);
       res.json({ success: true });
     } catch (error: any) {
-      console.error("Error updating subscription:", error);
-      res.status(500).json({ success: false, message: "Database error", error: error.message });
+      res.status(500).json({ success: false, message: error.message });
     }
   });
 
   app.delete("/api/subscriptions/:id", (req, res) => {
-    console.log(`DELETE /api/subscriptions/${req.params.id} hit`);
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
     try {
-      db.prepare("DELETE FROM subscriptions WHERE id = ?").run(req.params.id);
+      db.prepare("DELETE FROM subscriptions WHERE id = ? AND church_id = ?").run(req.params.id, churchId);
       res.json({ success: true });
     } catch (error: any) {
-      console.error("Error deleting subscription:", error);
-      res.status(500).json({ success: false, message: "Database error", error: error.message });
+      res.status(500).json({ success: false, message: error.message });
     }
   });
 
   // Dashboard Stats
   app.get("/api/dashboard/stats", (req, res) => {
-    console.log("GET /api/dashboard/stats hit");
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
     try {
-      const income = db.prepare("SELECT SUM(amount) as total FROM transactions WHERE type = 'income'").get().total || 0;
-      const expense = db.prepare("SELECT SUM(amount) as total FROM transactions WHERE type = 'expense'").get().total || 0;
-      const membersCount = db.prepare("SELECT COUNT(*) as count FROM members").get().count;
-      const activeSubs = db.prepare("SELECT COUNT(*) as count FROM subscriptions WHERE status = 'paid'").get().count;
+      const income = db.prepare("SELECT SUM(amount) as total FROM transactions WHERE type = 'income' AND church_id = ?").get(churchId).total || 0;
+      const expense = db.prepare("SELECT SUM(amount) as total FROM transactions WHERE type = 'expense' AND church_id = ?").get(churchId).total || 0;
+      const correction = db.prepare("SELECT SUM(amount) as total FROM corrections WHERE church_id = ?").get(churchId).total || 0;
+      const membersCount = db.prepare("SELECT COUNT(*) as count FROM members WHERE church_id = ?").get(churchId).count;
+      const activeSubs = db.prepare("SELECT COUNT(*) as count FROM subscriptions WHERE status = 'paid' AND church_id = ?").get(churchId).count;
       
-      res.json({ income, expense, balance: income - expense, membersCount, activeSubs });
+      res.json({ income, expense, correction, balance: income - expense + correction, membersCount, activeSubs });
     } catch (error: any) {
-      console.error("Error fetching stats:", error);
-      res.status(500).json({ success: false, message: "Database error", error: error.message });
+      res.status(500).json({ success: false, message: error.message });
     }
   });
 
   // Settings API
   app.get("/api/settings", (req, res) => {
-    console.log("GET /api/settings hit");
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
     try {
-      const settings = db.prepare("SELECT * FROM settings").all();
+      const settings = db.prepare("SELECT * FROM settings WHERE church_id = ?").all(churchId);
       const settingsObj = settings.reduce((acc: any, s: any) => ({ ...acc, [s.key]: s.value }), {});
       res.json(settingsObj);
     } catch (error: any) {
-      console.error("Error fetching settings:", error);
-      res.status(500).json({ success: false, message: "Database error", error: error.message });
+      res.status(500).json({ success: false, message: error.message });
     }
   });
 
   // Church Notes API
   app.get("/api/notes", (req, res) => {
-    console.log("GET /api/notes hit");
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
     try {
-      const notes = db.prepare("SELECT * FROM church_notes ORDER BY created_at DESC").all();
+      const notes = db.prepare("SELECT * FROM church_notes WHERE church_id = ? ORDER BY created_at DESC").all(churchId);
       res.json(notes);
     } catch (error: any) {
-      console.error("Error fetching notes:", error);
-      res.status(500).json({ success: false, message: "Database error", error: error.message });
+      res.status(500).json({ success: false, message: error.message });
     }
   });
 
   app.post("/api/notes", (req, res) => {
-    console.log("POST /api/notes hit");
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
     try {
       const { category, content, user_name, mobile, address, date, amount, status } = req.body;
       const result = db.prepare(`
-        INSERT INTO church_notes (category, content, user_name, mobile, address, date, amount, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO church_notes (church_id, category, content, user_name, mobile, address, date, amount, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
+        churchId,
         category, 
         content, 
         user_name, 
@@ -679,46 +1233,50 @@ async function startServer() {
       );
       res.json({ success: true, id: result.lastInsertRowid });
     } catch (error: any) {
-      console.error("Error creating note:", error);
-      res.status(500).json({ success: false, message: "Database error", error: error.message });
+      res.status(500).json({ success: false, message: error.message });
     }
   });
 
   app.put("/api/notes/:id", (req, res) => {
-    console.log(`PUT /api/notes/${req.params.id} hit`);
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
     try {
       const { category, content, user_name, mobile, address, date, amount, status } = req.body;
       db.prepare(`
         UPDATE church_notes 
         SET category = ?, content = ?, user_name = ?, mobile = ?, address = ?, date = ?, amount = ?, status = ?
-        WHERE id = ?
-      `).run(category, content, user_name, mobile, address, date, amount || 0, status || 'pending', req.params.id);
+        WHERE id = ? AND church_id = ?
+      `).run(category, content, user_name, mobile, address, date, amount || 0, status || 'pending', req.params.id, churchId);
       res.json({ success: true });
     } catch (error: any) {
-      console.error("Error updating note:", error);
-      res.status(500).json({ success: false, message: "Database error", error: error.message });
+      res.status(500).json({ success: false, message: error.message });
     }
   });
 
   app.delete("/api/notes/:id", (req, res) => {
     const { id } = req.params;
-    console.log(`DELETE /api/notes/${id} hit`);
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
     try {
-      const result = db.prepare("DELETE FROM church_notes WHERE id = ?").run(id);
-      console.log(`Delete result for note ${id}:`, result);
+      const parsedId = parseInt(id);
+      if (isNaN(parsedId)) return res.status(400).json({ success: false, message: "Invalid Note ID" });
+      const result = db.prepare("DELETE FROM church_notes WHERE id = ? AND church_id = ?").run(parsedId, churchId);
       if (result.changes > 0) {
         res.json({ success: true });
       } else {
         res.status(404).json({ success: false, message: "Note not found" });
       }
     } catch (error: any) {
-      console.error("Error deleting note:", error);
-      res.status(500).json({ success: false, message: "Database error", error: error.message });
+      res.status(500).json({ success: false, message: error.message });
     }
   });
 
   app.get("/api/reports/top-contributors", (req, res) => {
-    console.log("GET /api/reports/top-contributors hit");
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
     try {
       const topContributors = db.prepare(`
         SELECT 
@@ -730,32 +1288,39 @@ async function startServer() {
           COUNT(t.id) as transaction_count
         FROM members m
         JOIN transactions t ON m.id = t.member_id
-        WHERE t.type = 'income'
+        WHERE t.type = 'income' AND t.church_id = ? AND m.church_id = ?
         GROUP BY m.id
         ORDER BY total_contribution DESC
-      `).all();
+      `).all(churchId, churchId);
       res.json(topContributors);
     } catch (error: any) {
-      console.error("Error fetching top contributors:", error);
-      res.status(500).json({ success: false, message: "Database error", error: error.message });
+      res.status(500).json({ success: false, message: error.message });
     }
   });
 
   app.post("/api/settings", (req, res) => {
-    console.log("POST /api/settings hit");
+    const rawChurchId = req.headers['x-church-id'];
+    const churchId = validateChurchId(rawChurchId, req);
+    if (!churchId) return res.status(400).json({ success: false, message: "Valid Church ID required" });
     try {
       const updates = req.body;
-      const stmt = db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
+      const stmt = db.prepare("INSERT OR REPLACE INTO settings (church_id, key, value) VALUES (?, ?, ?)");
       const transaction = db.transaction((data) => {
         for (const [key, value] of Object.entries(data)) {
-          stmt.run(key, value);
+          stmt.run(churchId, key, value);
+          
+          // Sync with churches table for key fields - only if value is not empty
+          if (key === 'church_name' && typeof value === 'string' && value.trim() !== '') {
+            db.prepare("UPDATE churches SET name = ? WHERE id = ?").run(value, churchId);
+          } else if (key === 'address' && typeof value === 'string' && value.trim() !== '') {
+            db.prepare("UPDATE churches SET location = ? WHERE id = ?").run(value, churchId);
+          }
         }
       });
       transaction(updates);
       res.json({ success: true });
     } catch (error: any) {
-      console.error("Error updating settings:", error);
-      res.status(500).json({ success: false, message: "Database error", error: error.message });
+      res.status(500).json({ success: false, message: error.message });
     }
   });
 
@@ -922,6 +1487,171 @@ async function startServer() {
     }
   });
 
+  // Super Admin API
+  const validateSuperAdmin = (req: any, res: any, next: any) => {
+    const userRole = req.headers['x-user-role'];
+    if (userRole !== 'super_admin') {
+      return res.status(403).json({ success: false, message: "Super Admin access required" });
+    }
+    next();
+  };
+
+  app.get("/api/super/stats", validateSuperAdmin, (req, res) => {
+    console.log("Super Admin: Fetching stats");
+    try {
+      const totalChurches = db.prepare("SELECT COUNT(*) as count FROM churches").get() as any;
+      const activeChurches = db.prepare("SELECT COUNT(*) as count FROM churches WHERE status = 'active'").get() as any;
+      const totalUsers = db.prepare("SELECT COUNT(*) as count FROM users").get() as any;
+      
+      res.json({
+        totalChurches: totalChurches.count,
+        activeChurches: activeChurches.count,
+        totalUsers: totalUsers.count
+      });
+    } catch (error: any) {
+      console.error("Super Admin Stats Error:", error);
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  app.get("/api/super/churches", validateSuperAdmin, (req, res) => {
+    console.log("Super Admin: Fetching churches - Start");
+    try {
+      // Optimized query using LEFT JOINs instead of correlated subqueries
+      const churches = db.prepare(`
+        SELECT 
+          c.*, 
+          c.plan as subscription_plan,
+          u.username as admin_username,
+          u.id as admin_user_id,
+          COALESCE(t.total, 0) as total_contribution
+        FROM churches c
+        LEFT JOIN (
+          SELECT church_id, username, id 
+          FROM users 
+          WHERE role IN ('pastor', 'accountant')
+          GROUP BY church_id
+        ) u ON u.church_id = c.id
+        LEFT JOIN (
+          SELECT church_id, SUM(amount) as total 
+          FROM transactions 
+          WHERE type = 'income' 
+          GROUP BY church_id
+        ) t ON t.church_id = c.id
+      `).all();
+      console.log(`Super Admin: Fetched ${churches.length} churches`);
+      res.json(churches);
+    } catch (error: any) {
+      console.error("Super Admin Churches Error:", error);
+      res.status(500).json({ success: false, message: "Error fetching churches", error: error.message });
+    }
+  });
+
+  app.post("/api/super/churches", validateSuperAdmin, (req, res) => {
+    const { name, location, admin_name, admin_email, phone, username, password, plan, expiry_date } = req.body;
+    try {
+      const result = db.prepare("INSERT INTO churches (name, location, admin_name, admin_email, phone, status, plan, expiry_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+        name, location, admin_name, admin_email, phone, 'active', plan || 'Basic', expiry_date || null
+      );
+      const churchId = result.lastInsertRowid;
+
+      db.prepare("INSERT INTO users (username, password, role, name, email, church_id, status) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+        username, password, 'pastor', admin_name, admin_email, churchId, 'active'
+      );
+
+      // Seed default settings for the new church
+      const defaultSettings = [
+        { key: "church_name", value: name },
+        { key: "church_name_tamil", value: "" },
+        { key: "address", value: location },
+        { key: "currency", value: "INR" },
+        { key: "financial_year", value: "2024-2025" }
+      ];
+      for (const s of defaultSettings) {
+        db.prepare("INSERT INTO settings (church_id, key, value) VALUES (?, ?, ?)").run(churchId, s.key, s.value);
+      }
+
+      res.json({ success: true, message: "Church and Admin User created successfully", churchId });
+    } catch (error: any) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  app.put("/api/super/churches/:id", validateSuperAdmin, (req, res) => {
+    const { id } = req.params;
+    const { name, location, admin_name, admin_email, phone, status, plan, expiry_date } = req.body;
+    try {
+      const transaction = db.transaction(() => {
+        db.prepare("UPDATE churches SET name = ?, location = ?, admin_name = ?, admin_email = ?, phone = ?, status = ?, plan = ?, expiry_date = ? WHERE id = ?").run(
+          name, location, admin_name, admin_email, phone, status, plan || 'Basic', expiry_date || null, id
+        );
+        
+        // Also update the pastor user if exists
+        db.prepare("UPDATE users SET name = ?, email = ? WHERE church_id = ? AND (role = 'pastor' OR role = 'accountant')").run(
+          admin_name, admin_email, id
+        );
+
+        // Update church settings if they exist, or create them if they don't
+        db.prepare("INSERT OR REPLACE INTO settings (church_id, key, value) VALUES (?, 'church_name', ?)").run(id, name);
+        db.prepare("INSERT OR REPLACE INTO settings (church_id, key, value) VALUES (?, 'address', ?)").run(id, location);
+      });
+
+      transaction();
+      res.json({ success: true, message: "Church updated successfully" });
+    } catch (error: any) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  app.get("/api/super/profile", validateSuperAdmin, (req, res) => {
+    const userId = req.headers['x-user-id'];
+    try {
+      const user = db.prepare("SELECT name, username, email FROM users WHERE id = ?").get(userId) as any;
+      res.json(user);
+    } catch (error: any) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  app.put("/api/super/profile", validateSuperAdmin, (req, res) => {
+    const userId = req.headers['x-user-id'];
+    const { name, email } = req.body;
+    try {
+      db.prepare("UPDATE users SET name = ?, email = ? WHERE id = ?").run(name, email, userId);
+      res.json({ success: true, message: "Profile updated successfully" });
+    } catch (error: any) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  app.put("/api/super/change-password", validateSuperAdmin, (req, res) => {
+    const userId = req.headers['x-user-id'];
+    const { currentPassword, newPassword } = req.body;
+    try {
+      const user = db.prepare("SELECT password FROM users WHERE id = ?").get(userId) as any;
+      if (user.password !== currentPassword) {
+        return res.status(400).json({ success: false, message: "Incorrect current password" });
+      }
+      db.prepare("UPDATE users SET password = ? WHERE id = ?").run(newPassword, userId);
+      res.json({ success: true, message: "Password changed successfully" });
+    } catch (error: any) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
+  app.put("/api/super/churches/:id/password", validateSuperAdmin, (req, res) => {
+    const { id } = req.params;
+    const { password } = req.body;
+    try {
+      db.prepare("UPDATE users SET password = ? WHERE church_id = ? AND (role = 'pastor' OR role = 'accountant')").run(
+        password, id
+      );
+      res.json({ success: true, message: "Admin password updated successfully" });
+    } catch (error: any) {
+      res.status(500).json({ success: false, message: error.message });
+    }
+  });
+
   // 404 for API routes - prevent falling through to SPA fallback
   app.all("/api/*", (req, res) => {
     res.status(404).json({ success: false, message: `API route ${req.method} ${req.url} not found` });
@@ -953,4 +1683,7 @@ async function startServer() {
   });
 }
 
-startServer();
+startServer().catch(err => {
+  console.error("CRITICAL: Failed to start server:", err);
+  process.exit(1);
+});
