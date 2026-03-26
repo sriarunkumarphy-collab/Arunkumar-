@@ -293,6 +293,13 @@ if (!churchExists) {
   }
 }
 
+// Ensure all non-super-admin users have a church_id (outside the initial seed block)
+try {
+  db.prepare("UPDATE users SET church_id = 1 WHERE (role != 'super_admin' OR role IS NULL) AND church_id IS NULL").run();
+} catch (e) {
+  console.error("Error ensuring users have church_id:", e);
+}
+
 // Migration: Ensure dob column exists in members table
 try {
   db.prepare("ALTER TABLE members ADD COLUMN dob TEXT").run();
@@ -1671,10 +1678,11 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static("dist"));
-    // SPA fallback - exclude API routes
-    app.get(/^(?!\/api).+/, (req, res) => {
-      res.sendFile(path.resolve("dist/index.html"));
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
+    // SPA fallback - everything else serves index.html
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
     });
   }
 
