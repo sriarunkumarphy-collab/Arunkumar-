@@ -430,7 +430,7 @@ const parseId = (id: any): number | null => {
 const validateChurchId = (id: any, req?: any) => {
   // Allow super_admin to bypass church_id check for super admin routes
   if (req && req.headers['x-user-role'] === 'super_admin') {
-    return parseId(id) || 0; // Return the ID if provided, or 0 as a placeholder
+    return parseId(id) || 1; // Default to church 1 for super admin if no ID provided
   }
   const parsed = parseId(id);
   if (parsed === null) return null;

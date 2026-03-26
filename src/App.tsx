@@ -140,6 +140,47 @@ const safeFetch = async (url: string, options: RequestInit = {}, retries = 3) =>
   return executeFetch(0);
 };
 
+const printThermal = (html: string) => {
+  // Create a hidden iframe for robust printing across devices, especially mobile
+  const iframe = document.createElement('iframe');
+  iframe.style.position = 'fixed';
+  iframe.style.right = '0';
+  iframe.style.bottom = '0';
+  iframe.style.width = '100%';
+  iframe.style.height = '100%';
+  iframe.style.border = '0';
+  iframe.style.opacity = '0';
+  iframe.style.zIndex = '-1';
+  iframe.style.pointerEvents = 'none';
+  document.body.appendChild(iframe);
+  
+  const doc = iframe.contentWindow?.document;
+  if (doc) {
+    doc.open();
+    // Remove any auto-print/auto-close scripts from the HTML string as we handle it here
+    const cleanHtml = html.replace(/<script>.*?window\.print\(\).*?<\/script>/g, '');
+    doc.write(cleanHtml);
+    doc.close();
+    
+    // Wait for content to load and then print
+    const triggerPrint = () => {
+      if (iframe.contentWindow) {
+        iframe.contentWindow.focus();
+        iframe.contentWindow.print();
+        // Remove the iframe after some time to allow the print dialog to open
+        setTimeout(() => {
+          if (document.body.contains(iframe)) {
+            document.body.removeChild(iframe);
+          }
+        }, 1000);
+      }
+    };
+
+    // Increased delay to ensure styles and content are rendered, especially on mobile
+    setTimeout(triggerPrint, 500);
+  }
+};
+
 // Components
 const Sidebar = ({ activeTab, setActiveTab, isOpen, onClose }: { activeTab: string, setActiveTab: (t: string) => void, isOpen: boolean, onClose: () => void }) => {
   const { t } = useContext(LanguageContext);
@@ -230,13 +271,11 @@ const Header = ({ title, onMenuClick }: { title: string, onMenuClick: () => void
   const isSuperAdmin = user?.role === 'super_admin';
 
   return (
-    <header className={`h-16 bg-white/80 backdrop-blur-md border-b border-slate-200/60 fixed top-0 right-0 left-0 ${isSuperAdmin ? '' : 'md:left-64'} z-30 flex items-center justify-between px-4 md:px-8`}>
+    <header className={`h-16 bg-white/80 backdrop-blur-md border-b border-slate-200/60 fixed top-0 right-0 left-0 md:left-64 z-30 flex items-center justify-between px-4 md:px-8`}>
       <div className="flex items-center space-x-4">
-        {!isSuperAdmin && (
-          <button onClick={onMenuClick} className="md:hidden p-2 text-slate-600 hover:bg-slate-100 rounded-xl transition-colors">
-            <Menu size={24} />
-          </button>
-        )}
+        <button onClick={onMenuClick} className="md:hidden p-2 text-slate-600 hover:bg-slate-100 rounded-xl transition-colors">
+          <Menu size={24} />
+        </button>
         <div className="flex flex-col">
           <h2 className="text-lg md:text-xl font-black text-slate-800 tracking-tight uppercase leading-none">{title}</h2>
           {user?.church_name && (
@@ -409,6 +448,7 @@ const RemindersWidget = () => {
 
 const SpecialDaysPage = () => {
   const { t } = useLanguage();
+  const settings = useContext(SettingsContext);
   const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
@@ -442,12 +482,97 @@ const SpecialDaysPage = () => {
     .filter(m => m.marital_status === 'married' && m.anniversary_date && parseInt(m.anniversary_date.slice(5, 7)) === selectedMonth)
     .sort((a, b) => parseInt(a.anniversary_date!.slice(8, 10)) - parseInt(b.anniversary_date!.slice(8, 10)));
 
+  const handlePrint = () => {
+    const birthdayRows = monthBirthdays.map(m => `
+      <tr>
+        <td style="border: 1px solid #ddd; padding: 8px;">${m.dob?.slice(8, 10)}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">${m.name}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">${m.phone}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">Birthday</td>
+      </tr>
+    `).join('');
+
+    const anniversaryRows = monthAnniversaries.map(m => `
+      <tr>
+        <td style="border: 1px solid #ddd; padding: 8px;">${m.anniversary_date?.slice(8, 10)}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">${m.name} & ${m.spouse_name}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">${m.phone}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">Anniversary</td>
+      </tr>
+    `).join('');
+
+    printThermal(`
+      <html>
+        <head>
+          <title>Special Days - ${months.find(m => m.id === selectedMonth)?.name}</title>
+          <style>
+            body { font-family: sans-serif; padding: 20px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+            th { background-color: #f2f2f2; text-align: left; border: 1px solid #ddd; padding: 8px; }
+            h1 { text-align: center; color: #1e293b; }
+            .section-header { background-color: #f8fafc; padding: 10px; font-weight: bold; border: 1px solid #ddd; margin-top: 20px; }
+          </style>
+        </head>
+        <body>
+          <div style="text-align: center; margin-bottom: 30px;">
+            <h1>${settings?.church_name || 'CSI CHURCH'}</h1>
+            <h2>Special Days Report: ${months.find(m => m.id === selectedMonth)?.name}</h2>
+          </div>
+          
+          <div class="section-header">Birthdays</div>
+          <table>
+            <thead>
+              <tr>
+                <th>Day</th>
+                <th>Name</th>
+                <th>Phone</th>
+                <th>Type</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${birthdayRows || '<tr><td colspan="4" style="text-align: center; padding: 20px;">No birthdays this month</td></tr>'}
+            </tbody>
+          </table>
+
+          <div class="section-header">Anniversaries</div>
+          <table>
+            <thead>
+              <tr>
+                <th>Day</th>
+                <th>Names</th>
+                <th>Phone</th>
+                <th>Type</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${anniversaryRows || '<tr><td colspan="4" style="text-align: center; padding: 20px;">No anniversaries this month</td></tr>'}
+            </tbody>
+          </table>
+
+          <div style="margin-top: 40px; text-align: center; font-style: italic;">
+            ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
+          </div>
+        </body>
+      </html>
+    `);
+  };
+
   if (loading) return <div className="p-8 text-center">Loading...</div>;
 
   return (
     <div className="p-4 md:p-8 space-y-8">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <h2 className="text-3xl font-black text-slate-800 tracking-tight">{t('special_days')}</h2>
+        <div className="flex items-center space-x-4">
+          <h2 className="text-3xl font-black text-slate-800 tracking-tight">{t('special_days')}</h2>
+          <button 
+            onClick={handlePrint}
+            className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors border border-indigo-200 flex items-center space-x-2"
+            title="Print Monthly Report"
+          >
+            <Printer size={20} />
+            <span className="text-sm font-bold">Print</span>
+          </button>
+        </div>
         <div className="flex items-center space-x-2 overflow-x-auto pb-2 md:pb-0 no-scrollbar">
           {months.map(m => (
             <button
@@ -571,10 +696,95 @@ const Dashboard = () => {
     fetchRecent();
   }, []);
 
+  const handlePrintSummary = () => {
+    const recentRows = recent.map(tx => `
+      <tr>
+        <td style="border: 1px solid #ddd; padding: 8px;">${tx.date}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">${tx.category}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">${tx.member_name || tx.vendor_name || '-'}</td>
+        <td style="border: 1px solid #ddd; padding: 8px; color: ${tx.type === 'income' ? '#059669' : '#dc2626'}; font-weight: bold;">
+          ${tx.type === 'income' ? '+' : '-'} ₹${tx.amount.toLocaleString()}
+        </td>
+      </tr>
+    `).join('');
+
+    printThermal(`
+      <html>
+        <head>
+          <title>Dashboard Summary - ${settings?.church_name || 'CSI CMS'}</title>
+          <style>
+            body { font-family: sans-serif; padding: 20px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+            th { background-color: #f2f2f2; text-align: left; border: 1px solid #ddd; padding: 8px; }
+            h1 { text-align: center; color: #1e293b; }
+            .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-top: 20px; }
+            .stat-box { padding: 15px; border: 1px solid #ddd; border-radius: 8px; text-align: center; }
+          </style>
+        </head>
+        <body>
+          <div style="text-align: center; margin-bottom: 30px;">
+            <h1>${settings?.church_name || 'CSI CHURCH'}</h1>
+            <h2>Dashboard Overview</h2>
+            <p>Generated on: ${new Date().toLocaleString()}</p>
+          </div>
+
+          <div class="stats-grid">
+            <div class="stat-box">
+              <div style="font-size: 10px; color: #666;">TOTAL INCOME</div>
+              <div style="font-size: 18px; font-weight: bold; color: #059669;">₹${stats.income.toLocaleString()}</div>
+            </div>
+            <div class="stat-box">
+              <div style="font-size: 10px; color: #666;">TOTAL EXPENSE</div>
+              <div style="font-size: 18px; font-weight: bold; color: #dc2626;">₹${stats.expense.toLocaleString()}</div>
+            </div>
+            <div class="stat-box">
+              <div style="font-size: 10px; color: #666;">CORRECTION</div>
+              <div style="font-size: 18px; font-weight: bold; color: #d97706;">₹${stats.correction.toLocaleString()}</div>
+            </div>
+            <div class="stat-box">
+              <div style="font-size: 10px; color: #666;">NET BALANCE</div>
+              <div style="font-size: 18px; font-weight: bold; color: #2563eb;">₹${stats.balance.toLocaleString()}</div>
+            </div>
+          </div>
+
+          <h3 style="margin-top: 30px;">Recent Transactions</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Category</th>
+                <th>Name / Vendor</th>
+                <th>Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${recentRows}
+            </tbody>
+          </table>
+
+          <div style="margin-top: 40px; text-align: center; font-style: italic;">
+            ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
+          </div>
+        </body>
+      </html>
+    `);
+  };
+
   if (!stats) return <div className="p-8">Loading...</div>;
 
   return (
     <div className="p-4 md:p-8 space-y-8">
+      <div className="flex justify-between items-center">
+        <h2 className="text-3xl font-black text-slate-800 tracking-tight">Dashboard</h2>
+        <button 
+          onClick={handlePrintSummary}
+          className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors border border-indigo-200 flex items-center space-x-2"
+          title="Print Summary"
+        >
+          <Printer size={20} />
+          <span className="text-sm font-bold">Print Summary</span>
+        </button>
+      </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-6">
         <StatCard title={t('total_income')} value={stats.income} icon={ArrowUpCircle} color="text-indigo-600" bg="bg-indigo-50" />
         <StatCard title={t('total_expense')} value={stats.expense} icon={ArrowDownCircle} color="text-rose-600" bg="bg-rose-50" />
@@ -591,56 +801,51 @@ const Dashboard = () => {
           <div className="flex items-center space-x-3">
               <button 
                 onClick={() => {
-                  const printWindow = window.open('', '_blank');
-                  if (printWindow) {
-                    printWindow.document.write(`
-                      <html>
-                        <head>
-                          <title>Daily Summary - Thermal</title>
-                          <style>
-                            @page { margin: 0; }
-                            body { font-family: 'Courier New', Courier, monospace; width: 48mm; margin: 0; padding: 2mm; font-size: 10px; line-height: 1.2; }
-                            .center { text-align: center; }
-                            .bold { font-weight: bold; }
-                            .border-top { border-top: 1px dashed #000; margin-top: 2mm; padding-top: 2mm; }
-                            .flex { display: flex; justify-content: space-between; }
-                            .mt-1 { margin-top: 1mm; }
-                          </style>
-                        </head>
-                        <body>
-                          <div class="center bold">${settings?.church_name || 'CSI CHURCH'}</div>
-                          <div class="center">DAILY SUMMARY</div>
-                          <div class="center" style="font-size: 8px;">${new Date().toLocaleDateString()}</div>
-                          
-                          <div class="border-top mt-1">
-                            <div class="flex"><span>INCOME:</span> <span class="bold">₹${stats.income.toLocaleString()}</span></div>
-                            <div class="flex"><span>EXPENSE:</span> <span class="bold">₹${stats.expense.toLocaleString()}</span></div>
-                            <div class="flex"><span>CORR:</span> <span class="bold">${stats.correction >= 0 ? '+' : ''}₹${stats.correction.toLocaleString()}</span></div>
-                            <div class="flex mt-1"><span>BALANCE:</span> <span class="bold">₹${stats.balance.toLocaleString()}</span></div>
-                          </div>
+                  printThermal(`
+                    <html>
+                      <head>
+                        <title>Daily Summary - Thermal</title>
+                        <style>
+                          @page { margin: 0; }
+                          body { font-family: 'Courier New', Courier, monospace; width: 48mm; margin: 0; padding: 2mm; font-size: 10px; line-height: 1.2; }
+                          .center { text-align: center; }
+                          .bold { font-weight: bold; }
+                          .border-top { border-top: 1px dashed #000; margin-top: 2mm; padding-top: 2mm; }
+                          .flex { display: flex; justify-content: space-between; }
+                          .mt-1 { margin-top: 1mm; }
+                        </style>
+                      </head>
+                      <body>
+                        <div class="center bold">${settings?.church_name || 'CSI CHURCH'}</div>
+                        <div class="center">DAILY SUMMARY</div>
+                        <div class="center" style="font-size: 8px;">${new Date().toLocaleDateString()}</div>
+                        
+                        <div class="border-top mt-1">
+                          <div class="flex"><span>INCOME:</span> <span class="bold">₹${stats.income.toLocaleString()}</span></div>
+                          <div class="flex"><span>EXPENSE:</span> <span class="bold">₹${stats.expense.toLocaleString()}</span></div>
+                          <div class="flex"><span>CORR:</span> <span class="bold">${stats.correction >= 0 ? '+' : ''}₹${stats.correction.toLocaleString()}</span></div>
+                          <div class="flex mt-1"><span>BALANCE:</span> <span class="bold">₹${stats.balance.toLocaleString()}</span></div>
+                        </div>
 
-                          <div class="border-top mt-1">
-                            <div class="bold center">RECENT TXS</div>
-                            ${recent.map(tx => `
-                              <div class="flex mt-1" style="font-size: 8px;">
-                                <span>${tx.category.substring(0, 10)}</span>
-                                <span>₹${tx.amount}</span>
-                              </div>
-                            `).join('')}
-                          </div>
+                        <div class="border-top mt-1">
+                          <div class="bold center">RECENT TXS</div>
+                          ${recent.map(tx => `
+                            <div class="flex mt-1" style="font-size: 8px;">
+                              <span>${tx.category.substring(0, 10)}</span>
+                              <span>₹${tx.amount}</span>
+                            </div>
+                          `).join('')}
+                        </div>
 
-                          <div class="border-top center mt-1" style="font-size: 8px; font-style: italic;">
-                            ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
-                          </div>
-                          <div class="center mt-1" style="font-size: 8px;">
-                            Generated on ${settings?.church_name || 'CSI CMS'}
-                          </div>
-                          <script>window.onload = () => { window.print(); setTimeout(() => window.close(), 500); };</script>
-                        </body>
-                      </html>
-                    `);
-                    printWindow.document.close();
-                  }
+                        <div class="border-top center mt-1" style="font-size: 8px; font-style: italic;">
+                          ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
+                        </div>
+                        <div class="center mt-1" style="font-size: 8px;">
+                          Generated on ${settings?.church_name || 'CSI CMS'}
+                        </div>
+                      </body>
+                    </html>
+                  `);
                 }}
                 className="p-2.5 text-amber-600 hover:bg-amber-50 rounded-xl transition-all border border-amber-200 hover:shadow-sm"
                 title="Thermal Summary"
@@ -722,9 +927,6 @@ const MembersPage = () => {
   );
 
   const handlePrintList = () => {
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) return;
-
     const tableRows = filtered.map(m => `
       <tr>
         <td style="border: 1px solid #ddd; padding: 8px;">${m.member_code}</td>
@@ -735,7 +937,7 @@ const MembersPage = () => {
       </tr>
     `).join('');
 
-    printWindow.document.write(`
+    printThermal(`
       <html>
         <head>
           <title>Member List - ${settings?.church_name || 'CSI CMS'}</title>
@@ -773,11 +975,9 @@ const MembersPage = () => {
           <div style="margin-top: 40px; text-align: center; border-top: 1px solid #eee; padding-top: 20px;">
             <p style="font-style: italic; color: #666; font-size: 14px;">${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}</p>
           </div>
-          <script>window.print();</script>
         </body>
       </html>
     `);
-    printWindow.document.close();
   };
 
   const handleWhatsAppShareList = () => {
@@ -785,6 +985,70 @@ const MembersPage = () => {
     const summary = filtered.map(m => `${m.member_code}: ${m.name} (${m.phone})`).join('\n');
     const text = encodeURIComponent(`*${settings?.church_name || 'CSI CMS'} - Member List Summary*\n\nTotal Members: ${filtered.length}\n\n${summary}\n\n_${verse}_`);
     window.open(`https://wa.me/?text=${text}`, '_blank');
+  };
+
+  const handlePrintMember = (m: Member) => {
+    printThermal(`
+      <html>
+        <head>
+          <title>Member Details - ${m.member_code}</title>
+          <style>
+            body { font-family: sans-serif; padding: 40px; line-height: 1.6; color: #333; }
+            .card { border: 1px solid #e2e8f0; border-radius: 12px; padding: 30px; max-width: 500px; margin: auto; background: #fff; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+            .header { text-align: center; border-bottom: 2px solid #f1f5f9; padding-bottom: 20px; margin-bottom: 20px; }
+            .header h1 { color: #059669; margin: 0; font-size: 24px; }
+            .header p { color: #64748b; margin: 5px 0 0; font-size: 14px; }
+            .info-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #f8fafc; }
+            .info-row:last-child { border-bottom: none; }
+            .label { font-weight: 600; color: #64748b; font-size: 13px; text-transform: uppercase; }
+            .value { font-weight: 500; color: #1e293b; }
+            .footer { text-align: center; margin-top: 30px; font-style: italic; color: #94a3b8; font-size: 13px; }
+            .code-badge { background: #f1f5f9; padding: 4px 12px; border-radius: 9999px; font-family: monospace; font-weight: bold; color: #475569; }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <div class="header">
+              <h1>${settings?.church_name || 'CSI CHURCH'}</h1>
+              <p>${settings?.address || ''}</p>
+              <div style="margin-top: 15px; font-weight: bold; color: #059669; letter-spacing: 1px;">MEMBER IDENTIFICATION</div>
+            </div>
+            
+            <div class="info-row">
+              <span class="label">Member Code</span>
+              <span class="code-badge">${m.member_code}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Full Name</span>
+              <span class="value">${m.name}</span>
+            </div>
+            ${m.tamil_name ? `
+            <div class="info-row">
+              <span class="label">Tamil Name</span>
+              <span class="value">${m.tamil_name}</span>
+            </div>
+            ` : ''}
+            <div class="info-row">
+              <span class="label">Phone Number</span>
+              <span class="value">${m.phone}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Membership Type</span>
+              <span class="value" style="text-transform: capitalize;">${m.membership_type}</span>
+            </div>
+            <div class="info-row">
+              <span class="label">Joined Date</span>
+              <span class="value">${m.joined_date}</span>
+            </div>
+            
+            <div class="footer">
+              <p>${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}</p>
+              <p style="margin-top: 15px; font-size: 11px;">Generated on ${new Date().toLocaleDateString()}</p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `);
   };
 
   const handleWhatsAppShareMember = (m: Member) => {
@@ -810,48 +1074,43 @@ const MembersPage = () => {
           <div className="flex items-center space-x-2">
             <button 
               onClick={() => {
-                const printWindow = window.open('', '_blank');
-                if (printWindow) {
-                  printWindow.document.write(`
-                    <html>
-                      <head>
-                        <title>Member List - Thermal</title>
-                        <style>
-                          @page { margin: 0; }
-                          body { font-family: 'Courier New', Courier, monospace; width: 48mm; margin: 0; padding: 2mm; font-size: 10px; line-height: 1.2; }
-                          .center { text-align: center; }
-                          .bold { font-weight: bold; }
-                          .border-top { border-top: 1px dashed #000; margin-top: 2mm; padding-top: 2mm; }
-                          .flex { display: flex; justify-content: space-between; }
-                          .mt-1 { margin-top: 1mm; }
-                        </style>
-                      </head>
-                      <body>
-                        <div class="center bold">${settings?.church_name || 'CSI CHURCH'}</div>
-                        <div class="center">MEMBER LIST</div>
-                        <div class="center" style="font-size: 8px;">${new Date().toLocaleDateString()}</div>
-                        
-                        <div class="border-top mt-1">
-                          ${filtered.map(m => `
-                            <div class="flex mt-1" style="font-size: 8px;">
-                              <span>${m.member_code}</span>
-                              <span>${m.name.substring(0, 15)}</span>
-                            </div>
-                          `).join('')}
-                        </div>
+                printThermal(`
+                  <html>
+                    <head>
+                      <title>Member List - Thermal</title>
+                      <style>
+                        @page { margin: 0; }
+                        body { font-family: 'Courier New', Courier, monospace; width: 48mm; margin: 0; padding: 2mm; font-size: 10px; line-height: 1.2; }
+                        .center { text-align: center; }
+                        .bold { font-weight: bold; }
+                        .border-top { border-top: 1px dashed #000; margin-top: 2mm; padding-top: 2mm; }
+                        .flex { display: flex; justify-content: space-between; }
+                        .mt-1 { margin-top: 1mm; }
+                      </style>
+                    </head>
+                    <body>
+                      <div class="center bold">${settings?.church_name || 'CSI CHURCH'}</div>
+                      <div class="center">MEMBER LIST</div>
+                      <div class="center" style="font-size: 8px;">${new Date().toLocaleDateString()}</div>
+                      
+                      <div class="border-top mt-1">
+                        ${filtered.map(m => `
+                          <div class="flex mt-1" style="font-size: 8px;">
+                            <span>${m.member_code}</span>
+                            <span>${m.name.substring(0, 15)}</span>
+                          </div>
+                        `).join('')}
+                      </div>
 
-                        <div class="border-top center mt-1" style="font-size: 8px; font-style: italic;">
-                          ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
-                        </div>
-                        <div class="border-top center mt-1" style="font-size: 8px;">
-                          Total: ${filtered.length}
-                        </div>
-                        <script>window.onload = () => { window.print(); setTimeout(() => window.close(), 500); };</script>
-                      </body>
-                    </html>
-                  `);
-                  printWindow.document.close();
-                }
+                      <div class="border-top center mt-1" style="font-size: 8px; font-style: italic;">
+                        ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
+                      </div>
+                      <div class="border-top center mt-1" style="font-size: 8px;">
+                        Total: ${filtered.length}
+                      </div>
+                    </body>
+                  </html>
+                `);
               }}
               className="flex-1 sm:flex-none p-2 text-orange-600 hover:bg-orange-50 rounded-xl transition-colors border border-orange-200 flex items-center justify-center"
               title="Thermal Print List"
@@ -920,55 +1179,57 @@ const MembersPage = () => {
                   <div className="flex items-center space-x-2">
                     <button 
                       onClick={() => {
-                        const printWindow = window.open('', '_blank');
-                        if (printWindow) {
-                          printWindow.document.write(`
-                            <html>
-                              <head>
-                                <title>Member Slip - ${m.member_code}</title>
-                                <style>
-                                  @page { margin: 0; }
-                                  body { font-family: 'Courier New', Courier, monospace; width: 48mm; margin: 0; padding: 2mm; font-size: 10px; line-height: 1.2; }
-                                  .center { text-align: center; }
-                                  .bold { font-weight: bold; }
-                                  .border-top { border-top: 1px dashed #000; margin-top: 2mm; padding-top: 2mm; }
-                                  .large { font-size: 14px; }
-                                  .mt-1 { margin-top: 1mm; }
-                                </style>
-                              </head>
-                              <body>
-                                <div class="center bold">${settings?.church_name || 'CSI CHURCH'}</div>
-                                <div class="center" style="font-size: 8px;">MEMBER SLIP</div>
-                                
-                                <div class="border-top mt-1 center">
-                                  <div class="large bold">${m.member_code}</div>
-                                  <div class="bold">${m.name}</div>
-                                  <div style="font-size: 8px;">${m.tamil_name || ''}</div>
-                                </div>
+                        printThermal(`
+                          <html>
+                            <head>
+                              <title>Member Slip - ${m.member_code}</title>
+                              <style>
+                                @page { margin: 0; }
+                                body { font-family: 'Courier New', Courier, monospace; width: 48mm; margin: 0; padding: 2mm; font-size: 10px; line-height: 1.2; }
+                                .center { text-align: center; }
+                                .bold { font-weight: bold; }
+                                .border-top { border-top: 1px dashed #000; margin-top: 2mm; padding-top: 2mm; }
+                                .large { font-size: 14px; }
+                                .mt-1 { margin-top: 1mm; }
+                              </style>
+                            </head>
+                            <body>
+                              <div class="center bold">${settings?.church_name || 'CSI CHURCH'}</div>
+                              <div class="center" style="font-size: 8px;">MEMBER SLIP</div>
+                              
+                              <div class="border-top mt-1 center">
+                                <div class="large bold">${m.member_code}</div>
+                                <div class="bold">${m.name}</div>
+                                <div style="font-size: 8px;">${m.tamil_name || ''}</div>
+                              </div>
 
-                                <div class="mt-1" style="font-size: 8px;">
-                                  <div>Phone: ${m.phone}</div>
-                                  <div>Type: ${m.membership_type}</div>
-                                  <div>Joined: ${m.joined_date}</div>
-                                </div>
+                              <div class="mt-1" style="font-size: 8px;">
+                                <div>Phone: ${m.phone}</div>
+                                <div>Type: ${m.membership_type}</div>
+                                <div>Joined: ${m.joined_date}</div>
+                              </div>
 
-                                <div class="border-top center mt-1" style="font-size: 8px; font-style: italic;">
-                                  ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
-                                </div>
-                                <div class="border-top center mt-1" style="font-size: 8px;">
-                                  Generated on ${settings?.church_name || 'CSI CMS'}
-                                </div>
-                                <script>window.onload = () => { window.print(); setTimeout(() => window.close(), 500); };</script>
-                              </body>
-                            </html>
-                          `);
-                          printWindow.document.close();
-                        }
+                              <div class="border-top center mt-1" style="font-size: 8px; font-style: italic;">
+                                ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
+                              </div>
+                              <div class="border-top center mt-1" style="font-size: 8px;">
+                                Generated on ${settings?.church_name || 'CSI CMS'}
+                              </div>
+                            </body>
+                          </html>
+                        `);
                       }}
                       className="text-slate-400 hover:text-orange-600 transition-colors p-1 rounded-md hover:bg-orange-50"
                       title="Thermal Print Slip"
                     >
                       <Printer size={18} className="rotate-180" />
+                    </button>
+                    <button 
+                      onClick={() => handlePrintMember(m)}
+                      className="text-slate-400 hover:text-indigo-600 transition-colors p-1 rounded-md hover:bg-indigo-50"
+                      title="Print Details"
+                    >
+                      <Printer size={18} />
                     </button>
                     <button 
                       onClick={() => handleWhatsAppShareMember(m)}
@@ -1033,6 +1294,9 @@ const MembersPage = () => {
             <div className="flex items-center justify-between pt-2 border-t border-slate-50">
               <div className="text-sm text-slate-600 font-medium">{m.phone}</div>
               <div className="flex items-center space-x-3">
+                <button onClick={() => handlePrintMember(m)} className="p-2 text-slate-600 bg-slate-50 rounded-lg">
+                  <Printer size={18} />
+                </button>
                 <button onClick={() => handleWhatsAppShareMember(m)} className="p-2 text-indigo-600 bg-indigo-50 rounded-lg">
                   <Share2 size={18} />
                 </button>
@@ -1344,6 +1608,30 @@ const TransactionsPage = ({ type }: { type: 'income' | 'expense' }) => {
   const [editingTx, setEditingTx] = useState<Transaction | null>(null);
   const [viewingTx, setViewingTx] = useState<Transaction | null>(null);
   const [selectedTxForCorrection, setSelectedTxForCorrection] = useState<Transaction | null>(null);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterCategory, setFilterCategory] = useState('all');
+
+  const categories = useMemo(() => {
+    return Array.from(new Set(txs.map(tx => tx.category)));
+  }, [txs]);
+
+  const filteredTxs = useMemo(() => {
+    return txs.filter(tx => {
+      const matchesSearch = 
+        tx.invoice_no.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (tx.member_name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (tx.vendor_name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+        tx.category.toLowerCase().includes(searchTerm.toLowerCase());
+      
+      const matchesCategory = filterCategory === 'all' || tx.category === filterCategory;
+      
+      return matchesSearch && matchesCategory;
+    });
+  }, [txs, searchTerm, filterCategory]);
+
+  const totalAmount = useMemo(() => {
+    return filteredTxs.reduce((sum, tx) => sum + tx.amount, 0);
+  }, [filteredTxs]);
 
   const handleRenumber = async () => {
     if (!window.confirm("This will re-sequence all invoice numbers for this church starting from 1 based on creation date. This cannot be undone. Are you sure?")) return;
@@ -1390,10 +1678,7 @@ const TransactionsPage = ({ type }: { type: 'income' | 'expense' }) => {
   }, [type]);
 
   const handlePrintList = () => {
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) return;
-
-    const tableRows = txs.map(tx => `
+    const tableRows = filteredTxs.map(tx => `
       <tr>
         <td style="border: 1px solid #ddd; padding: 8px;">${tx.invoice_no}</td>
         <td style="border: 1px solid #ddd; padding: 8px;">${tx.date}</td>
@@ -1404,9 +1689,9 @@ const TransactionsPage = ({ type }: { type: 'income' | 'expense' }) => {
       </tr>
     `).join('');
 
-    const total = txs.reduce((sum, tx) => sum + tx.amount, 0);
+    const total = totalAmount;
 
-    printWindow.document.write(`
+    printThermal(`
       <html>
         <head>
           <title>${type === 'income' ? 'Income' : 'Expense'} List - ${settings?.church_name || 'CSI CMS'}</title>
@@ -1447,18 +1732,13 @@ const TransactionsPage = ({ type }: { type: 'income' | 'expense' }) => {
           <div style="margin-top: 40px; text-align: center; border-top: 1px solid #eee; padding-top: 20px;">
             <p style="font-style: italic; color: #666; font-size: 14px;">${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}</p>
           </div>
-          <script>window.print();</script>
         </body>
       </html>
     `);
-    printWindow.document.close();
   };
 
   const handleThermalPrintCorrection = (corr: Correction) => {
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) return;
-
-    printWindow.document.write(`
+    printThermal(`
       <html>
         <head>
           <title>Thermal Correction - ${corr.correction_no}</title>
@@ -1512,17 +1792,9 @@ const TransactionsPage = ({ type }: { type: 'income' | 'expense' }) => {
           <div class="center mt-1" style="font-size: 8px;">
             *** THANK YOU ***
           </div>
-
-          <script>
-            window.onload = () => {
-              window.print();
-              setTimeout(() => window.close(), 500);
-            };
-          </script>
         </body>
       </html>
     `);
-    printWindow.document.close();
   };
 
   const handleWhatsAppShareCorrection = (corr: Correction) => {
@@ -1532,10 +1804,7 @@ const TransactionsPage = ({ type }: { type: 'income' | 'expense' }) => {
   };
 
   const handlePrintCorrection = (corr: Correction) => {
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) return;
-
-    printWindow.document.write(`
+    printThermal(`
       <html>
         <head>
           <title>Correction Invoice - ${corr.correction_no}</title>
@@ -1573,11 +1842,9 @@ const TransactionsPage = ({ type }: { type: 'income' | 'expense' }) => {
           <div style="margin-top: 40px; text-align: center; border-top: 1px dashed #ccc; padding-top: 20px;">
             <p style="font-style: italic; color: #444; font-size: 14px; font-weight: 500;">${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}</p>
           </div>
-          <script>window.print();</script>
         </body>
       </html>
     `);
-    printWindow.document.close();
   };
 
   const handleWhatsAppShareList = () => {
@@ -1589,16 +1856,15 @@ const TransactionsPage = ({ type }: { type: 'income' | 'expense' }) => {
   };
 
   return (
-    <div className="p-8 space-y-6">
-      <div className="flex justify-between items-center">
+    <div className="p-4 md:p-8 space-y-6 pb-24 md:pb-8">
+      <div className="flex flex-col md:flex-row justify-between md:items-center gap-4">
         <div className="flex items-center space-x-4">
-          <h3 className="text-lg font-bold text-slate-800">{type === 'income' ? t('income') : t('expenses')}</h3>
-          <button 
-            onClick={() => {
-              const total = txs.reduce((sum, tx) => sum + tx.amount, 0);
-              const printWindow = window.open('', '_blank');
-              if (printWindow) {
-                printWindow.document.write(`
+          <h3 className="text-xl font-black text-slate-800 uppercase tracking-tight">{type === 'income' ? t('income') : t('expenses')}</h3>
+          <div className="flex items-center space-x-2">
+            <button 
+              onClick={() => {
+                const total = filteredTxs.reduce((sum, tx) => sum + tx.amount, 0);
+                printThermal(`
                   <html>
                     <head>
                       <title>${type.toUpperCase()} List - Thermal</title>
@@ -1618,7 +1884,7 @@ const TransactionsPage = ({ type }: { type: 'income' | 'expense' }) => {
                       <div class="center" style="font-size: 8px;">${new Date().toLocaleDateString()}</div>
                       
                       <div class="border-top mt-1">
-                        ${txs.map(tx => `
+                        ${filteredTxs.map(tx => `
                           <div class="flex mt-1" style="font-size: 8px;">
                             <span>${tx.invoice_no}</span>
                             <span>₹${tx.amount}</span>
@@ -1632,37 +1898,35 @@ const TransactionsPage = ({ type }: { type: 'income' | 'expense' }) => {
                       <div class="border-top center mt-1" style="font-size: 8px; font-style: italic;">
                         ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
                       </div>
-                      <script>window.onload = () => { window.print(); setTimeout(() => window.close(), 500); };</script>
                     </body>
                   </html>
                 `);
-                printWindow.document.close();
-              }
-            }}
-            className="p-2 text-orange-600 hover:bg-orange-50 rounded-lg transition-colors border border-orange-200"
-            title="Thermal Print List"
-          >
-            <Printer size={20} className="rotate-180" />
-          </button>
-          <button 
-            onClick={handlePrintList}
-            className="p-2 text-slate-600 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors border border-slate-200"
-            title="Print List"
-          >
-            <Printer size={20} />
-          </button>
-          <button 
-            onClick={handleWhatsAppShareList}
-            className="p-2 text-slate-600 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors border border-slate-200"
-            title="Share List via WhatsApp"
-          >
-            <Share2 size={20} />
-          </button>
+              }}
+              className="p-2 text-orange-600 hover:bg-orange-50 rounded-xl transition-colors border border-orange-200"
+              title="Thermal Print List"
+            >
+              <Printer size={20} className="rotate-180" />
+            </button>
+            <button 
+              onClick={handlePrintList}
+              className="p-2 text-slate-600 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors border border-slate-200"
+              title="Print List"
+            >
+              <Printer size={20} />
+            </button>
+            <button 
+              onClick={handleWhatsAppShareList}
+              className="p-2 text-slate-600 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors border border-slate-200"
+              title="Share List via WhatsApp"
+            >
+              <Share2 size={20} />
+            </button>
+          </div>
         </div>
-        <div className="flex space-x-2">
+        <div className="flex items-center space-x-2">
           <button 
             onClick={handleRenumber}
-            className="flex items-center space-x-2 px-4 py-2 bg-slate-100 text-slate-600 rounded-xl font-bold hover:bg-slate-200 transition-all text-sm"
+            className="flex items-center space-x-2 px-4 py-2.5 bg-slate-100 text-slate-600 rounded-xl font-bold hover:bg-slate-200 transition-all text-sm"
             title="Fix invoice numbering gaps"
           >
             <Hash size={18} />
@@ -1670,7 +1934,7 @@ const TransactionsPage = ({ type }: { type: 'income' | 'expense' }) => {
           </button>
           <button 
             onClick={() => setShowModal(true)}
-            className={`px-4 py-2 rounded-lg font-medium flex items-center space-x-2 text-white transition-colors ${type === 'income' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-rose-600 hover:bg-rose-700'}`}
+            className={`hidden md:flex px-6 py-2.5 rounded-xl font-bold items-center space-x-2 text-white transition-all shadow-lg ${type === 'income' ? 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-100' : 'bg-rose-600 hover:bg-rose-700 shadow-rose-100'}`}
           >
             <Plus size={20} />
             <span>{type === 'income' ? t('add_income') : t('add_expense')}</span>
@@ -1678,22 +1942,52 @@ const TransactionsPage = ({ type }: { type: 'income' | 'expense' }) => {
         </div>
       </div>
 
+      {/* Summary and Filters */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className={`md:col-span-1 p-4 rounded-2xl border flex flex-col justify-center ${type === 'income' ? 'bg-indigo-50 border-indigo-100' : 'bg-rose-50 border-rose-100'}`}>
+          <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">{t('total_amount')}</span>
+          <span className={`text-2xl font-black ${type === 'income' ? 'text-indigo-600' : 'text-rose-600'}`}>₹{totalAmount.toLocaleString()}</span>
+        </div>
+        <div className="md:col-span-2 relative">
+          <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+          <input 
+            type="text"
+            placeholder="Search invoice, name, category..."
+            className="w-full pl-12 pr-4 py-4 rounded-2xl bg-white border border-slate-200 outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-medium"
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+          />
+        </div>
+        <div className="md:col-span-1">
+          <select 
+            className="w-full p-4 rounded-2xl bg-white border border-slate-200 outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-medium appearance-none"
+            value={filterCategory}
+            onChange={(e) => setFilterCategory(e.target.value)}
+          >
+            <option value="all">All Categories</option>
+            {categories.map(cat => (
+              <option key={cat} value={cat}>{t(cat as any) || cat}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
       {/* Desktop Table View */}
       <div className="hidden md:block bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
         <table className="w-full text-left">
-          <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wider">
+          <thead className="bg-slate-50 text-slate-500 text-[10px] font-bold uppercase tracking-widest">
             <tr>
-              <th className="px-6 py-3 font-semibold">{t('invoice_no')}</th>
-              <th className="px-6 py-3 font-semibold">{t('date')}</th>
-              <th className="px-6 py-3 font-semibold">{t('category')}</th>
-              <th className="px-6 py-3 font-semibold">{type === 'income' ? t('name') : t('vendor')}</th>
-              <th className="px-6 py-3 font-semibold">{t('amount')}</th>
-              <th className="px-6 py-3 font-semibold">{t('payment_mode')}</th>
-              <th className="px-6 py-3 font-semibold">{t('actions')}</th>
+              <th className="px-6 py-4">{t('invoice_no')}</th>
+              <th className="px-6 py-4">{t('date')}</th>
+              <th className="px-6 py-4">{t('category')}</th>
+              <th className="px-6 py-4">{type === 'income' ? t('name') : t('vendor')}</th>
+              <th className="px-6 py-4">{t('amount')}</th>
+              <th className="px-6 py-4">{t('payment_mode')}</th>
+              <th className="px-6 py-4">{t('actions')}</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {txs.map((tx) => (
+            {filteredTxs.map((tx) => (
               <tr key={tx.id} className={`hover:bg-slate-50 transition-colors ${tx.correction_count > 0 ? 'bg-orange-50/30' : ''}`}>
                 <td className="px-6 py-4 text-sm font-mono text-slate-500">
                   <div className="flex items-center space-x-2">
@@ -1752,73 +2046,62 @@ const TransactionsPage = ({ type }: { type: 'income' | 'expense' }) => {
                     )}
                     <button 
                       onClick={() => {
-                        const printWindow = window.open('', '_blank');
-                        if (printWindow) {
-                          printWindow.document.write(`
-                            <html>
-                              <head>
-                                <title>Thermal Receipt - ${tx.invoice_no}</title>
-                                <style>
-                                  @page { margin: 0; }
-                                  body { 
-                                    font-family: 'Courier New', Courier, monospace; 
-                                    width: 48mm; 
-                                    margin: 0; 
-                                    padding: 2mm; 
-                                    font-size: 10px;
-                                    line-height: 1.2;
-                                    color: #000;
-                                  }
-                                  .center { text-align: center; }
-                                  .bold { font-weight: bold; }
-                                  .border-top { border-top: 1px dashed #000; margin-top: 2mm; padding-top: 2mm; }
-                                  .border-bottom { border-bottom: 1px dashed #000; margin-bottom: 2mm; padding-bottom: 2mm; }
-                                  .flex { display: flex; justify-content: space-between; }
-                                  .large { font-size: 14px; }
-                                  .mt-1 { margin-top: 1mm; }
-                                  .mb-1 { margin-bottom: 1mm; }
-                                </style>
-                              </head>
-                              <body>
-                                <div class="center bold large">${settings?.church_name || 'CSI CHURCH'}</div>
-                                <div class="center mt-1">${settings?.church_name_tamil || ''}</div>
-                                <div class="center" style="font-size: 8px;">${settings?.address || ''}</div>
-                                
-                                <div class="border-top mb-1">
-                                  <div class="flex"><span>NO:</span> <span class="bold">${tx.invoice_no}</span></div>
-                                  <div class="flex"><span>DATE:</span> <span>${tx.date}</span></div>
-                                </div>
+                        printThermal(`
+                          <html>
+                            <head>
+                              <title>Thermal Receipt - ${tx.invoice_no}</title>
+                              <style>
+                                @page { margin: 0; }
+                                body { 
+                                  font-family: 'Courier New', Courier, monospace; 
+                                  width: 48mm; 
+                                  margin: 0; 
+                                  padding: 2mm; 
+                                  font-size: 10px;
+                                  line-height: 1.2;
+                                  color: #000;
+                                }
+                                .center { text-align: center; }
+                                .bold { font-weight: bold; }
+                                .border-top { border-top: 1px dashed #000; margin-top: 2mm; padding-top: 2mm; }
+                                .border-bottom { border-bottom: 1px dashed #000; margin-bottom: 2mm; padding-bottom: 2mm; }
+                                .flex { display: flex; justify-content: space-between; }
+                                .large { font-size: 14px; }
+                                .mt-1 { margin-top: 1mm; }
+                                .mb-1 { margin-bottom: 1mm; }
+                              </style>
+                            </head>
+                            <body>
+                              <div class="center bold large">${settings?.church_name || 'CSI CHURCH'}</div>
+                              <div class="center mt-1">${settings?.church_name_tamil || ''}</div>
+                              <div class="center" style="font-size: 8px;">${settings?.address || ''}</div>
+                              
+                              <div class="border-top mb-1">
+                                <div class="flex"><span>NO:</span> <span class="bold">${tx.invoice_no}</span></div>
+                                <div class="flex"><span>DATE:</span> <span>${tx.date}</span></div>
+                              </div>
 
-                                <div class="border-top border-bottom">
-                                  <div class="bold">${tx.category.toUpperCase()}</div>
-                                  <div class="mt-1">${tx.member_name || tx.vendor_name || '-'}</div>
-                                  <div class="flex mt-1"><span>MODE:</span> <span>${tx.payment_mode.toUpperCase()}</span></div>
-                                </div>
+                              <div class="border-top border-bottom">
+                                <div class="bold">${tx.category.toUpperCase()}</div>
+                                <div class="mt-1">${tx.member_name || tx.vendor_name || '-'}</div>
+                                <div class="flex mt-1"><span>MODE:</span> <span>${tx.payment_mode.toUpperCase()}</span></div>
+                              </div>
 
-                                <div class="flex large bold mt-1">
-                                  <span>TOTAL:</span>
-                                  <span>₹${tx.amount.toLocaleString()}</span>
-                                </div>
+                              <div class="flex large bold mt-1">
+                                <span>TOTAL:</span>
+                                <span>₹${tx.amount.toLocaleString()}</span>
+                              </div>
 
-                                <div class="border-top center" style="font-size: 8px; font-style: italic;">
-                                  ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
-                                </div>
-                                
-                                <div class="center mt-1" style="font-size: 8px;">
-                                  *** THANK YOU ***
-                                </div>
-
-                                <script>
-                                  window.onload = () => {
-                                    window.print();
-                                    setTimeout(() => window.close(), 500);
-                                  };
-                                </script>
-                              </body>
-                            </html>
-                          `);
-                          printWindow.document.close();
-                        }
+                              <div class="border-top center" style="font-size: 8px; font-style: italic;">
+                                ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
+                              </div>
+                              
+                              <div class="center mt-1" style="font-size: 8px;">
+                                *** THANK YOU ***
+                              </div>
+                            </body>
+                          </html>
+                        `);
                       }}
                       className="text-slate-400 hover:text-orange-600 transition-colors p-1 rounded-md hover:bg-orange-50"
                       title="Thermal Print (48mm/58mm)"
@@ -1827,48 +2110,43 @@ const TransactionsPage = ({ type }: { type: 'income' | 'expense' }) => {
                     </button>
                     <button 
                       onClick={() => {
-                        const printWindow = window.open('', '_blank');
-                        if (printWindow) {
-                          printWindow.document.write(`
-                            <html>
-                              <head>
-                                <title>Receipt - ${tx.invoice_no}</title>
-                                <style>
-                                  body { font-family: sans-serif; padding: 40px; }
-                                  .header { text-align: center; margin-bottom: 30px; }
-                                  .details { margin-bottom: 20px; }
-                                  .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #eee; }
-                                  .total { font-size: 20px; font-bold; margin-top: 20px; text-align: right; }
-                                </style>
-                              </head>
-                              <body>
-                                <div class="header">
-                                  <h1 style="margin-bottom: 5px;">${settings?.church_name || 'C.S.I W.J HATCH MEMORIAL CHURCH'}</h1>
-                                  <h2 style="margin-top: 0; font-size: 18px; color: #444;">${settings?.church_name_tamil || ''}</h2>
-                                  <p style="font-size: 12px; color: #666; margin-top: 5px;">${settings?.address || ''}</p>
-                                  <hr style="border: 0; border-top: 2px solid #059669; margin: 20px 0;">
-                                  <p style="font-weight: bold; text-transform: uppercase; letter-spacing: 2px;">Official Receipt</p>
-                                </div>
-                                <div class="details">
-                                  <div class="row"><span>Invoice No:</span> <span>${tx.invoice_no}</span></div>
-                                  <div class="row"><span>Date:</span> <span>${tx.date}</span></div>
-                                  <div class="row"><span>Category:</span> <span>${tx.category.toUpperCase()}</span></div>
-                                  <div class="row"><span>${tx.type === 'income' ? 'Member' : 'Vendor'}:</span> <span>${tx.member_name || tx.vendor_name || '-'}</span></div>
-                                  <div class="row"><span>Payment Mode:</span> <span>${tx.payment_mode.toUpperCase()}</span></div>
-                                </div>
-                                <div class="total">Amount: ₹${tx.amount.toLocaleString()}</div>
-                                <div style="margin-top: 40px; text-align: center; border-top: 1px dashed #ccc; padding-top: 20px;">
-                                  <p style="font-style: italic; color: #444; font-size: 14px; font-weight: 500;">${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}</p>
-                                </div>
-                                <div style="margin-top: 20px; text-align: center; color: #888; font-size: 12px;">
-                                  Thank you for your contribution.
-                                </div>
-                                <script>window.print();</script>
-                              </body>
-                            </html>
-                          `);
-                          printWindow.document.close();
-                        }
+                        printThermal(`
+                          <html>
+                            <head>
+                              <title>Receipt - ${tx.invoice_no}</title>
+                              <style>
+                                body { font-family: sans-serif; padding: 40px; }
+                                .header { text-align: center; margin-bottom: 30px; }
+                                .details { margin-bottom: 20px; }
+                                .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #eee; }
+                                .total { font-size: 20px; font-bold; margin-top: 20px; text-align: right; }
+                              </style>
+                            </head>
+                            <body>
+                              <div class="header">
+                                <h1 style="margin-bottom: 5px;">${settings?.church_name || 'C.S.I W.J HATCH MEMORIAL CHURCH'}</h1>
+                                <h2 style="margin-top: 0; font-size: 18px; color: #444;">${settings?.church_name_tamil || ''}</h2>
+                                <p style="font-size: 12px; color: #666; margin-top: 5px;">${settings?.address || ''}</p>
+                                <hr style="border: 0; border-top: 2px solid #059669; margin: 20px 0;">
+                                <p style="font-weight: bold; text-transform: uppercase; letter-spacing: 2px;">Official Receipt</p>
+                              </div>
+                              <div class="details">
+                                <div class="row"><span>Invoice No:</span> <span>${tx.invoice_no}</span></div>
+                                <div class="row"><span>Date:</span> <span>${tx.date}</span></div>
+                                <div class="row"><span>Category:</span> <span>${tx.category.toUpperCase()}</span></div>
+                                <div class="row"><span>${tx.type === 'income' ? 'Member' : 'Vendor'}:</span> <span>${tx.member_name || tx.vendor_name || '-'}</span></div>
+                                <div class="row"><span>Payment Mode:</span> <span>${tx.payment_mode.toUpperCase()}</span></div>
+                              </div>
+                              <div class="total">Amount: ₹${tx.amount.toLocaleString()}</div>
+                              <div style="margin-top: 40px; text-align: center; border-top: 1px dashed #ccc; padding-top: 20px;">
+                                <p style="font-style: italic; color: #444; font-size: 14px; font-weight: 500;">${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}</p>
+                              </div>
+                              <div style="margin-top: 20px; text-align: center; color: #888; font-size: 12px;">
+                                Thank you for your contribution.
+                              </div>
+                            </body>
+                          </html>
+                        `);
                       }}
                       className="text-slate-400 hover:text-emerald-600 transition-colors p-1 rounded-md hover:bg-emerald-50"
                       title={t('print')}
@@ -1885,7 +2163,7 @@ const TransactionsPage = ({ type }: { type: 'income' | 'expense' }) => {
 
       {/* Mobile Card View */}
       <div className="md:hidden space-y-4">
-        {txs.map((tx) => (
+        {filteredTxs.map((tx) => (
           <div key={tx.id} className={`bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3 ${tx.correction_count > 0 ? 'bg-orange-50/30' : ''}`}>
             <div className="flex justify-between items-start">
               <div>
@@ -1942,73 +2220,62 @@ const TransactionsPage = ({ type }: { type: 'income' | 'expense' }) => {
                 )}
                 <button 
                   onClick={() => {
-                    const printWindow = window.open('', '_blank');
-                    if (printWindow) {
-                      printWindow.document.write(`
-                        <html>
-                          <head>
-                            <title>Thermal Receipt - ${tx.invoice_no}</title>
-                            <style>
-                              @page { margin: 0; }
-                              body { 
-                                font-family: 'Courier New', Courier, monospace; 
-                                width: 48mm; 
-                                margin: 0; 
-                                padding: 2mm; 
-                                font-size: 10px;
-                                line-height: 1.2;
-                                color: #000;
-                              }
-                              .center { text-align: center; }
-                              .bold { font-weight: bold; }
-                              .border-top { border-top: 1px dashed #000; margin-top: 2mm; padding-top: 2mm; }
-                              .border-bottom { border-bottom: 1px dashed #000; margin-bottom: 2mm; padding-bottom: 2mm; }
-                              .flex { display: flex; justify-content: space-between; }
-                              .large { font-size: 14px; }
-                              .mt-1 { margin-top: 1mm; }
-                              .mb-1 { margin-bottom: 1mm; }
-                            </style>
-                          </head>
-                          <body>
-                            <div class="center bold large">${settings?.church_name || 'CSI CHURCH'}</div>
-                            <div class="center mt-1">${settings?.church_name_tamil || ''}</div>
-                            <div class="center" style="font-size: 8px;">${settings?.address || ''}</div>
-                            
-                            <div class="border-top mb-1">
-                              <div class="flex"><span>NO:</span> <span class="bold">${tx.invoice_no}</span></div>
-                              <div class="flex"><span>DATE:</span> <span>${tx.date}</span></div>
-                            </div>
+                    printThermal(`
+                      <html>
+                        <head>
+                          <title>Thermal Receipt - ${tx.invoice_no}</title>
+                          <style>
+                            @page { margin: 0; }
+                            body { 
+                              font-family: 'Courier New', Courier, monospace; 
+                              width: 48mm; 
+                              margin: 0; 
+                              padding: 2mm; 
+                              font-size: 10px;
+                              line-height: 1.2;
+                              color: #000;
+                            }
+                            .center { text-align: center; }
+                            .bold { font-weight: bold; }
+                            .border-top { border-top: 1px dashed #000; margin-top: 2mm; padding-top: 2mm; }
+                            .border-bottom { border-bottom: 1px dashed #000; margin-bottom: 2mm; padding-bottom: 2mm; }
+                            .flex { display: flex; justify-content: space-between; }
+                            .large { font-size: 14px; }
+                            .mt-1 { margin-top: 1mm; }
+                            .mb-1 { margin-bottom: 1mm; }
+                          </style>
+                        </head>
+                        <body>
+                          <div class="center bold large">${settings?.church_name || 'CSI CHURCH'}</div>
+                          <div class="center mt-1">${settings?.church_name_tamil || ''}</div>
+                          <div class="center" style="font-size: 8px;">${settings?.address || ''}</div>
+                          
+                          <div class="border-top mb-1">
+                            <div class="flex"><span>NO:</span> <span class="bold">${tx.invoice_no}</span></div>
+                            <div class="flex"><span>DATE:</span> <span>${tx.date}</span></div>
+                          </div>
 
-                            <div class="border-top border-bottom">
-                              <div class="bold">${tx.category.toUpperCase()}</div>
-                              <div class="mt-1">${tx.member_name || tx.vendor_name || '-'}</div>
-                              <div class="flex mt-1"><span>MODE:</span> <span>${tx.payment_mode.toUpperCase()}</span></div>
-                            </div>
+                          <div class="border-top border-bottom">
+                            <div class="bold">${tx.category.toUpperCase()}</div>
+                            <div class="mt-1">${tx.member_name || tx.vendor_name || '-'}</div>
+                            <div class="flex mt-1"><span>MODE:</span> <span>${tx.payment_mode.toUpperCase()}</span></div>
+                          </div>
 
-                            <div class="flex large bold mt-1">
-                              <span>TOTAL:</span>
-                              <span>₹${tx.amount.toLocaleString()}</span>
-                            </div>
+                          <div class="flex large bold mt-1">
+                            <span>TOTAL:</span>
+                            <span>₹${tx.amount.toLocaleString()}</span>
+                          </div>
 
-                            <div class="border-top center" style="font-size: 8px; font-style: italic;">
-                              ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
-                            </div>
-                            
-                            <div class="center mt-1" style="font-size: 8px;">
-                              *** THANK YOU ***
-                            </div>
-
-                            <script>
-                              window.onload = () => {
-                                window.print();
-                                setTimeout(() => window.close(), 500);
-                              };
-                            </script>
-                          </body>
-                        </html>
-                      `);
-                      printWindow.document.close();
-                    }
+                          <div class="border-top center" style="font-size: 8px; font-style: italic;">
+                            ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
+                          </div>
+                          
+                          <div class="center mt-1" style="font-size: 8px;">
+                            *** THANK YOU ***
+                          </div>
+                        </body>
+                      </html>
+                    `);
                   }}
                   className="p-2 text-orange-600 bg-orange-50 rounded-lg"
                   title="Thermal Print"
@@ -2017,48 +2284,43 @@ const TransactionsPage = ({ type }: { type: 'income' | 'expense' }) => {
                 </button>
                 <button 
                   onClick={() => {
-                    const printWindow = window.open('', '_blank');
-                    if (printWindow) {
-                      printWindow.document.write(`
-                        <html>
-                          <head>
-                            <title>Receipt - ${tx.invoice_no}</title>
-                            <style>
-                              body { font-family: sans-serif; padding: 40px; }
-                              .header { text-align: center; margin-bottom: 30px; }
-                              .details { margin-bottom: 20px; }
-                              .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #eee; }
-                              .total { font-size: 20px; font-bold; margin-top: 20px; text-align: right; }
-                            </style>
-                          </head>
-                          <body>
-                            <div class="header">
-                              <h1 style="margin-bottom: 5px;">${settings?.church_name || 'C.S.I W.J HATCH MEMORIAL CHURCH'}</h1>
-                              <h2 style="margin-top: 0; font-size: 18px; color: #444;">${settings?.church_name_tamil || ''}</h2>
-                              <p style="font-size: 12px; color: #666; margin-top: 5px;">${settings?.address || ''}</p>
-                              <hr style="border: 0; border-top: 2px solid #059669; margin: 20px 0;">
-                              <p style="font-weight: bold; text-transform: uppercase; letter-spacing: 2px;">Official Receipt</p>
-                            </div>
-                            <div class="details">
-                              <div class="row"><span>Invoice No:</span> <span>${tx.invoice_no}</span></div>
-                              <div class="row"><span>Date:</span> <span>${tx.date}</span></div>
-                              <div class="row"><span>Category:</span> <span>${tx.category.toUpperCase()}</span></div>
-                              <div class="row"><span>${tx.type === 'income' ? 'Member' : 'Vendor'}:</span> <span>${tx.member_name || tx.vendor_name || '-'}</span></div>
-                              <div class="row"><span>Payment Mode:</span> <span>${tx.payment_mode.toUpperCase()}</span></div>
-                            </div>
-                            <div class="total">Amount: ₹${tx.amount.toLocaleString()}</div>
-                            <div style="margin-top: 40px; text-align: center; border-top: 1px dashed #ccc; padding-top: 20px;">
-                              <p style="font-style: italic; color: #444; font-size: 14px; font-weight: 500;">${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}</p>
-                            </div>
-                            <div style="margin-top: 20px; text-align: center; color: #888; font-size: 12px;">
-                              Thank you for your contribution.
-                            </div>
-                            <script>window.print();</script>
-                          </body>
-                        </html>
-                      `);
-                      printWindow.document.close();
-                    }
+                    printThermal(`
+                      <html>
+                        <head>
+                          <title>Receipt - ${tx.invoice_no}</title>
+                          <style>
+                            body { font-family: sans-serif; padding: 40px; }
+                            .header { text-align: center; margin-bottom: 30px; }
+                            .details { margin-bottom: 20px; }
+                            .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #eee; }
+                            .total { font-size: 20px; font-bold; margin-top: 20px; text-align: right; }
+                          </style>
+                        </head>
+                        <body>
+                          <div class="header">
+                            <h1 style="margin-bottom: 5px;">${settings?.church_name || 'C.S.I W.J HATCH MEMORIAL CHURCH'}</h1>
+                            <h2 style="margin-top: 0; font-size: 18px; color: #444;">${settings?.church_name_tamil || ''}</h2>
+                            <p style="font-size: 12px; color: #666; margin-top: 5px;">${settings?.address || ''}</p>
+                            <hr style="border: 0; border-top: 2px solid #059669; margin: 20px 0;">
+                            <p style="font-weight: bold; text-transform: uppercase; letter-spacing: 2px;">Official Receipt</p>
+                          </div>
+                          <div class="details">
+                            <div class="row"><span>Invoice No:</span> <span>${tx.invoice_no}</span></div>
+                            <div class="row"><span>Date:</span> <span>${tx.date}</span></div>
+                            <div class="row"><span>Category:</span> <span>${tx.category.toUpperCase()}</span></div>
+                            <div class="row"><span>${tx.type === 'income' ? 'Member' : 'Vendor'}:</span> <span>${tx.member_name || tx.vendor_name || '-'}</span></div>
+                            <div class="row"><span>Payment Mode:</span> <span>${tx.payment_mode.toUpperCase()}</span></div>
+                          </div>
+                          <div class="total">Amount: ₹${tx.amount.toLocaleString()}</div>
+                          <div style="margin-top: 40px; text-align: center; border-top: 1px dashed #ccc; padding-top: 20px;">
+                            <p style="font-style: italic; color: #444; font-size: 14px; font-weight: 500;">${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}</p>
+                          </div>
+                          <div style="margin-top: 20px; text-align: center; color: #888; font-size: 12px;">
+                            Thank you for your contribution.
+                          </div>
+                        </body>
+                      </html>
+                    `);
                   }}
                   className="p-2 text-emerald-600 bg-emerald-50 rounded-lg"
                 >
@@ -2158,6 +2420,14 @@ const TransactionsPage = ({ type }: { type: 'income' | 'expense' }) => {
         onSuccess={fetchData}
         nextCorrectionNo={nextCorrectionNo}
       />
+
+      {/* Mobile Floating Action Button */}
+      <button 
+        onClick={() => setShowModal(true)}
+        className={`fixed bottom-24 right-6 md:hidden w-14 h-14 rounded-full flex items-center justify-center text-white shadow-2xl z-40 animate-bounce-slow ${type === 'income' ? 'bg-indigo-600 shadow-indigo-200' : 'bg-rose-600 shadow-rose-200'}`}
+      >
+        <Plus size={28} />
+      </button>
     </div>
   );
 };
@@ -2265,76 +2535,150 @@ const TransactionModal = ({ type, onClose, onSave, initialData, readOnly = false
     }
   };
 
+  const handlePrintReceipt = () => {
+    const memberName = members.find(m => m.id === formData.member_id)?.name || formData.vendor_name || '-';
+    printThermal(`
+      <html>
+        <head>
+          <title>Transaction Receipt - ${formData.invoice_no}</title>
+          <style>
+            body { font-family: sans-serif; padding: 40px; line-height: 1.6; color: #333; }
+            .receipt { border: 2px solid #f1f5f9; border-radius: 16px; padding: 40px; max-width: 700px; margin: auto; background: #fff; }
+            .header { text-align: center; border-bottom: 2px solid #f1f5f9; padding-bottom: 30px; margin-bottom: 30px; }
+            .header h1 { color: #4f46e5; margin: 0; font-size: 28px; text-transform: uppercase; letter-spacing: 1px; }
+            .header p { color: #64748b; margin: 8px 0 0; font-size: 15px; }
+            .receipt-info { display: flex; justify-content: space-between; margin-bottom: 40px; font-size: 14px; color: #64748b; }
+            .info-group h4 { margin: 0 0 5px; text-transform: uppercase; font-size: 11px; letter-spacing: 1px; color: #94a3b8; }
+            .info-group p { margin: 0; font-weight: 600; color: #1e293b; font-size: 16px; }
+            .details-table { width: 100%; border-collapse: collapse; margin-bottom: 40px; }
+            .details-table th { text-align: left; padding: 12px; border-bottom: 2px solid #f1f5f9; color: #94a3b8; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+            .details-table td { padding: 20px 12px; border-bottom: 1px solid #f8fafc; font-size: 15px; }
+            .amount-section { display: flex; justify-content: flex-end; }
+            .amount-box { background: #f8fafc; padding: 20px 30px; border-radius: 12px; text-align: right; min-width: 200px; }
+            .amount-label { font-size: 12px; color: #64748b; text-transform: uppercase; font-weight: 600; margin-bottom: 5px; }
+            .amount-value { font-size: 28px; font-weight: 800; color: #1e293b; }
+            .footer { text-align: center; margin-top: 50px; padding-top: 30px; border-top: 2px solid #f1f5f9; }
+            .verse { font-style: italic; color: #64748b; font-size: 15px; margin-bottom: 15px; }
+            .thank-you { font-weight: 700; color: #4f46e5; text-transform: uppercase; letter-spacing: 2px; font-size: 12px; }
+          </style>
+        </head>
+        <body>
+          <div class="receipt">
+            <div class="header">
+              <h1>${settings?.church_name || 'CSI CHURCH'}</h1>
+              <p>${settings?.address || ''}</p>
+              <div style="margin-top: 20px; display: inline-block; padding: 6px 16px; background: #eef2ff; color: #4f46e5; border-radius: 20px; font-weight: 700; font-size: 12px; text-transform: uppercase;">
+                ${type === 'income' ? 'Income Receipt' : 'Expense Voucher'}
+              </div>
+            </div>
+
+            <div class="receipt-info">
+              <div class="info-group">
+                <h4>Invoice Number</h4>
+                <p>${formData.invoice_no}</p>
+              </div>
+              <div class="info-group" style="text-align: right;">
+                <h4>Date</h4>
+                <p>${new Date(formData.date).toLocaleDateString()}</p>
+              </div>
+            </div>
+
+            <table class="details-table">
+              <thead>
+                <tr>
+                  <th>Description</th>
+                  <th style="text-align: right;">Payment Mode</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>
+                    <div style="font-weight: 700; color: #1e293b; margin-bottom: 4px; text-transform: capitalize;">${formData.category.replace('_', ' ')}</div>
+                    <div style="font-size: 13px; color: #64748b;">${type === 'income' ? 'Received from' : 'Paid to'}: ${memberName}</div>
+                    ${formData.notes ? `<div style="font-size: 12px; color: #94a3b8; margin-top: 8px; font-style: italic;">Note: ${formData.notes}</div>` : ''}
+                  </td>
+                  <td style="text-align: right; font-weight: 600; text-transform: uppercase; font-size: 13px;">${formData.payment_mode}</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <div class="amount-section">
+              <div class="amount-box">
+                <div class="amount-label">Total Amount</div>
+                <div class="amount-value">₹${Number(formData.amount).toLocaleString()}</div>
+              </div>
+            </div>
+
+            <div class="footer">
+              <p class="verse">${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}</p>
+              <p class="thank-you">*** God Bless You ***</p>
+              <p style="margin-top: 20px; font-size: 10px; color: #cbd5e1;">Computer generated document. No signature required.</p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `);
+  };
+
   const handleSaveAndPrint = async () => {
     try {
       const tx = await handleSubmit({ preventDefault: () => {} } as any);
       if (tx) {
-        const printWindow = window.open('', '_blank');
-        if (printWindow) {
-          printWindow.document.write(`
-            <html>
-              <head>
-                <title>Thermal Receipt - ${tx.invoice_no}</title>
-                <style>
-                  @page { margin: 0; }
-                  body { 
-                    font-family: 'Courier New', Courier, monospace; 
-                    width: 48mm; 
-                    margin: 0; 
-                    padding: 2mm; 
-                    font-size: 10px;
-                    line-height: 1.2;
-                    color: #000;
-                  }
-                  .center { text-align: center; }
-                  .bold { font-weight: bold; }
-                  .border-top { border-top: 1px dashed #000; margin-top: 2mm; padding-top: 2mm; }
-                  .border-bottom { border-bottom: 1px dashed #000; margin-bottom: 2mm; padding-bottom: 2mm; }
-                  .flex { display: flex; justify-content: space-between; }
-                  .large { font-size: 14px; }
-                  .mt-1 { margin-top: 1mm; }
-                  .mb-1 { margin-bottom: 1mm; }
-                </style>
-              </head>
-              <body>
-                <div class="center bold large">${settings?.church_name || 'CSI CHURCH'}</div>
-                <div class="center mt-1">${settings?.church_name_tamil || ''}</div>
-                
-                <div class="border-top mb-1">
-                  <div class="flex"><span>NO:</span> <span class="bold">${tx.invoice_no}</span></div>
-                  <div class="flex"><span>DATE:</span> <span>${tx.date}</span></div>
-                </div>
+        printThermal(`
+          <html>
+            <head>
+              <title>Thermal Receipt - ${tx.invoice_no}</title>
+              <style>
+                @page { margin: 0; }
+                body { 
+                  font-family: 'Courier New', Courier, monospace; 
+                  width: 48mm; 
+                  margin: 0; 
+                  padding: 2mm; 
+                  font-size: 10px;
+                  line-height: 1.2;
+                  color: #000;
+                }
+                .center { text-align: center; }
+                .bold { font-weight: bold; }
+                .border-top { border-top: 1px dashed #000; margin-top: 2mm; padding-top: 2mm; }
+                .border-bottom { border-bottom: 1px dashed #000; margin-bottom: 2mm; padding-bottom: 2mm; }
+                .flex { display: flex; justify-content: space-between; }
+                .large { font-size: 14px; }
+                .mt-1 { margin-top: 1mm; }
+                .mb-1 { margin-bottom: 1mm; }
+              </style>
+            </head>
+            <body>
+              <div class="center bold large">${settings?.church_name || 'CSI CHURCH'}</div>
+              <div class="center mt-1">${settings?.church_name_tamil || ''}</div>
+              
+              <div class="border-top mb-1">
+                <div class="flex"><span>NO:</span> <span class="bold">${tx.invoice_no}</span></div>
+                <div class="flex"><span>DATE:</span> <span>${tx.date}</span></div>
+              </div>
 
-                <div class="border-top border-bottom">
-                  <div class="bold">${(formData.category === 'other' ? customCategory : formData.category).toUpperCase()}</div>
-                  <div class="mt-1">${members.find(m => m.id === formData.member_id)?.name || formData.vendor_name || '-'}</div>
-                  <div class="flex mt-1"><span>MODE:</span> <span>${formData.payment_mode.toUpperCase()}</span></div>
-                </div>
+              <div class="border-top border-bottom">
+                <div class="bold">${(formData.category === 'other' ? customCategory : formData.category).toUpperCase()}</div>
+                <div class="mt-1">${members.find(m => m.id === formData.member_id)?.name || formData.vendor_name || '-'}</div>
+                <div class="flex mt-1"><span>MODE:</span> <span>${formData.payment_mode.toUpperCase()}</span></div>
+              </div>
 
-                <div class="flex large bold mt-1">
-                  <span>TOTAL:</span>
-                  <span>₹${Number(formData.amount).toLocaleString()}</span>
-                </div>
+              <div class="flex large bold mt-1">
+                <span>TOTAL:</span>
+                <span>₹${Number(formData.amount).toLocaleString()}</span>
+              </div>
 
-                <div class="border-top center" style="font-size: 8px; font-style: italic;">
-                  ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
-                </div>
-                
-                <div class="center mt-1" style="font-size: 8px;">
-                  *** THANK YOU ***
-                </div>
-
-                <script>
-                  window.onload = () => {
-                    window.print();
-                    setTimeout(() => window.close(), 500);
-                  };
-                </script>
-              </body>
-            </html>
-          `);
-          printWindow.document.close();
-        }
+              <div class="border-top center" style="font-size: 8px; font-style: italic;">
+                ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
+              </div>
+              
+              <div class="center mt-1" style="font-size: 8px;">
+                *** THANK YOU ***
+              </div>
+            </body>
+          </html>
+        `);
       }
     } catch (err) {
       // Error already handled in handleSubmit
@@ -2480,6 +2824,16 @@ const TransactionModal = ({ type, onClose, onSave, initialData, readOnly = false
           </fieldset>
 
           <div className="flex justify-end space-x-3 mt-6">
+            {readOnly && (
+              <button 
+                type="button" 
+                onClick={handlePrintReceipt}
+                className="flex-1 py-3 rounded-xl font-bold text-indigo-600 border-2 border-indigo-600 hover:bg-indigo-50 transition-all flex items-center justify-center space-x-2"
+              >
+                <Printer size={20} />
+                <span>Print Receipt</span>
+              </button>
+            )}
             <button 
               type="button" 
               onClick={onClose}
@@ -2537,10 +2891,7 @@ const SubscriptionsPage = () => {
   }, []);
 
   const handlePrintReceipt = (sub: Subscription) => {
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) return;
-
-    printWindow.document.write(`
+    printThermal(`
       <html>
         <head>
           <title>Receipt - ${sub.id}</title>
@@ -2574,18 +2925,13 @@ const SubscriptionsPage = () => {
               <p style="margin-top: 20px; font-size: 12px;">This is a computer generated receipt.</p>
             </div>
           </div>
-          <script>window.print();</script>
         </body>
       </html>
     `);
-    printWindow.document.close();
   };
 
   const handleThermalPrintReceipt = (sub: Subscription) => {
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) return;
-
-    printWindow.document.write(`
+    printThermal(`
       <html>
         <head>
           <title>Thermal Receipt</title>
@@ -2616,11 +2962,9 @@ const SubscriptionsPage = () => {
           <div class="center mt-1" style="font-size: 8px; font-style: italic; margin-top: 2mm;">
             ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
           </div>
-          <script>window.onload = () => { window.print(); setTimeout(() => window.close(), 500); };</script>
         </body>
       </html>
     `);
-    printWindow.document.close();
   };
 
   const handleWhatsAppShareReceipt = (sub: Subscription) => {
@@ -2629,11 +2973,69 @@ const SubscriptionsPage = () => {
     window.open(`https://wa.me/?text=${text}`, '_blank');
   };
 
+  const handlePrintList = () => {
+    const tableRows = subs.map(sub => `
+      <tr>
+        <td style="border: 1px solid #ddd; padding: 8px;">${sub.member_name}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">${sub.start_date}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">${sub.end_date}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">₹${sub.amount.toLocaleString()}</td>
+        <td style="border: 1px solid #ddd; padding: 8px; text-transform: uppercase;">${sub.status}</td>
+      </tr>
+    `).join('');
+
+    printThermal(`
+      <html>
+        <head>
+          <title>Subscription List - ${settings?.church_name || 'CSI CMS'}</title>
+          <style>
+            body { font-family: sans-serif; padding: 20px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+            th { background-color: #f2f2f2; text-align: left; border: 1px solid #ddd; padding: 8px; }
+            h1 { text-align: center; color: #4f46e5; }
+          </style>
+        </head>
+        <body>
+          <div style="text-align: center; margin-bottom: 30px;">
+            <h1>${settings?.church_name || 'CSI CHURCH'}</h1>
+            <h2>Subscription List</h2>
+            <p>Generated on: ${new Date().toLocaleString()}</p>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Member Name</th>
+                <th>Start Date</th>
+                <th>End Date</th>
+                <th>Amount</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${tableRows || '<tr><td colspan="5" style="text-align: center; padding: 20px;">No subscriptions found</td></tr>'}
+            </tbody>
+          </table>
+          <div style="margin-top: 40px; text-align: center; font-style: italic;">
+            ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
+          </div>
+        </body>
+      </html>
+    `);
+  };
+
   return (
-    <div className="p-8 space-y-6">
+    <div className="p-4 md:p-8 space-y-6">
       <div className="flex justify-between items-center">
         <div className="flex items-center space-x-4">
           <h3 className="text-lg font-bold text-slate-800">{t('subscriptions')}</h3>
+          <button 
+            onClick={handlePrintList}
+            className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors border border-indigo-200 flex items-center space-x-2"
+            title="Print List"
+          >
+            <Printer size={20} />
+            <span className="text-sm font-bold">Print</span>
+          </button>
         </div>
         <button 
           onClick={() => setShowModal(true)}
@@ -2644,8 +3046,8 @@ const SubscriptionsPage = () => {
         </button>
       </div>
 
-      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-        <table className="w-full text-left">
+      <div className="bg-white rounded-xl border border-slate-200 overflow-x-auto shadow-sm">
+        <table className="w-full text-left min-w-[800px]">
           <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wider">
             <tr>
               <th className="px-6 py-3 font-semibold">{t('name')}</th>
@@ -2907,12 +3309,74 @@ const Notepad = () => {
     setShowModal(true);
   };
 
+  const handlePrintList = () => {
+    const tableRows = notes.map(note => `
+      <tr>
+        <td style="border: 1px solid #ddd; padding: 8px;">${note.date}</td>
+        <td style="border: 1px solid #ddd; padding: 8px; text-transform: uppercase;">${note.category}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">${note.user_name}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">${note.content}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">₹${(note.amount || 0).toLocaleString()}</td>
+        <td style="border: 1px solid #ddd; padding: 8px; text-transform: uppercase;">${note.status || 'PENDING'}</td>
+      </tr>
+    `).join('');
+
+    printThermal(`
+      <html>
+        <head>
+          <title>Notepad List - ${settings?.church_name || 'CSI CMS'}</title>
+          <style>
+            body { font-family: sans-serif; padding: 20px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+            th { background-color: #f2f2f2; text-align: left; border: 1px solid #ddd; padding: 8px; }
+            h1 { text-align: center; color: #4f46e5; }
+          </style>
+        </head>
+        <body>
+          <div style="text-align: center; margin-bottom: 30px;">
+            <h1>${settings?.church_name || 'CSI CHURCH'}</h1>
+            <h2>Notepad / Event List</h2>
+            <p>Generated on: ${new Date().toLocaleString()}</p>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Category</th>
+                <th>User</th>
+                <th>Content</th>
+                <th>Amount</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${tableRows || '<tr><td colspan="6" style="text-align: center; padding: 20px;">No notes found</td></tr>'}
+            </tbody>
+          </table>
+          <div style="margin-top: 40px; text-align: center; font-style: italic;">
+            ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
+          </div>
+        </body>
+      </html>
+    `);
+  };
+
   if (loading) return <div className="p-8">Loading...</div>;
 
   return (
-    <div className="p-8 space-y-6">
+    <div className="p-4 md:p-8 space-y-6">
       <div className="flex justify-between items-center">
-        <h3 className="text-lg font-bold text-slate-800">{t('notepad')}</h3>
+        <div className="flex items-center space-x-4">
+          <h3 className="text-lg font-bold text-slate-800">{t('notepad')}</h3>
+          <button 
+            onClick={handlePrintList}
+            className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors border border-indigo-200 flex items-center space-x-2"
+            title="Print List"
+          >
+            <Printer size={20} />
+            <span className="text-sm font-bold">Print</span>
+          </button>
+        </div>
         <button 
           onClick={() => {
             setEditingNote(null);
@@ -2966,42 +3430,37 @@ const Notepad = () => {
                 </button>
                 <button 
                   onClick={() => {
-                    const printWindow = window.open('', '_blank');
-                    if (printWindow) {
-                      printWindow.document.write(`
-                        <html>
-                          <head>
-                            <title>Note - Thermal</title>
-                            <style>
-                              @page { margin: 0; }
-                              body { font-family: 'Courier New', Courier, monospace; width: 48mm; margin: 0; padding: 2mm; font-size: 10px; line-height: 1.2; }
-                              .center { text-align: center; }
-                              .bold { font-weight: bold; }
-                              .border-top { border-top: 1px dashed #000; margin-top: 2mm; padding-top: 2mm; }
-                              .mt-1 { margin-top: 1mm; }
-                            </style>
-                          </head>
-                          <body>
-                            <div class="center bold">${settings?.church_name || 'CSI CHURCH'}</div>
-                            <div class="center">${note.category.toUpperCase()}</div>
-                            <div class="center" style="font-size: 8px;">${note.date}</div>
-                            
-                            <div class="border-top mt-1">
-                              <div class="bold">${note.user_name}</div>
-                              <div class="mt-1">${note.content}</div>
-                              ${note.amount ? `<div class="flex mt-1 bold"><span>AMOUNT:</span> <span>₹${note.amount.toLocaleString()}</span></div>` : ''}
-                              <div class="flex mt-1"><span>STATUS:</span> <span class="bold">${(note.status || 'pending').toUpperCase()}</span></div>
-                            </div>
+                    printThermal(`
+                      <html>
+                        <head>
+                          <title>Note - Thermal</title>
+                          <style>
+                            @page { margin: 0; }
+                            body { font-family: 'Courier New', Courier, monospace; width: 48mm; margin: 0; padding: 2mm; font-size: 10px; line-height: 1.2; }
+                            .center { text-align: center; }
+                            .bold { font-weight: bold; }
+                            .border-top { border-top: 1px dashed #000; margin-top: 2mm; padding-top: 2mm; }
+                            .mt-1 { margin-top: 1mm; }
+                          </style>
+                        </head>
+                        <body>
+                          <div class="center bold">${settings?.church_name || 'CSI CHURCH'}</div>
+                          <div class="center">${note.category.toUpperCase()}</div>
+                          <div class="center" style="font-size: 8px;">${note.date}</div>
+                          
+                          <div class="border-top mt-1">
+                            <div class="bold">${note.user_name}</div>
+                            <div class="mt-1">${note.content}</div>
+                            ${note.amount ? `<div class="flex mt-1 bold"><span>AMOUNT:</span> <span>₹${note.amount.toLocaleString()}</span></div>` : ''}
+                            <div class="flex mt-1"><span>STATUS:</span> <span class="bold">${(note.status || 'pending').toUpperCase()}</span></div>
+                          </div>
 
-                            <div class="border-top center mt-1" style="font-size: 8px; font-style: italic;">
-                              ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
-                            </div>
-                            <script>window.onload = () => { window.print(); setTimeout(() => window.close(), 500); };</script>
-                          </body>
-                        </html>
-                      `);
-                      printWindow.document.close();
-                    }
+                          <div class="border-top center mt-1" style="font-size: 8px; font-style: italic;">
+                            ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
+                          </div>
+                        </body>
+                      </html>
+                    `);
                   }}
                   className="p-1.5 text-slate-400 hover:text-orange-600"
                 >
@@ -3215,9 +3674,6 @@ const IncomeAnalysis = () => {
   );
 
   const handlePrint = () => {
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) return;
-
     const rows = filteredContributors.map((c, i) => `
       <tr>
         <td style="border: 1px solid #ddd; padding: 8px;">${i + 1}</td>
@@ -3228,7 +3684,7 @@ const IncomeAnalysis = () => {
       </tr>
     `).join('');
 
-    printWindow.document.write(`
+    printThermal(`
       <html>
         <head>
           <title>Income Analysis - Top Contributors</title>
@@ -3262,11 +3718,9 @@ const IncomeAnalysis = () => {
           <div style="margin-top: 40px; text-align: center; font-style: italic;">
             ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
           </div>
-          <script>window.print();</script>
         </body>
       </html>
     `);
-    printWindow.document.close();
   };
 
   const handleWhatsAppShare = () => {
@@ -3281,7 +3735,7 @@ const IncomeAnalysis = () => {
   if (loading) return <div className="p-8">Loading...</div>;
 
   return (
-    <div className="p-8 space-y-6">
+    <div className="p-4 md:p-8 space-y-6">
       <div className="flex justify-between items-center">
         <h3 className="text-lg font-bold text-slate-800">{t('income_analysis')}</h3>
         <div className="flex items-center space-x-2">
@@ -3303,45 +3757,40 @@ const IncomeAnalysis = () => {
           </button>
           <button 
             onClick={() => {
-              const printWindow = window.open('', '_blank');
-              if (printWindow) {
-                printWindow.document.write(`
-                  <html>
-                    <head>
-                      <title>Top Contributors - Thermal</title>
-                      <style>
-                        @page { margin: 0; }
-                        body { font-family: 'Courier New', Courier, monospace; width: 48mm; margin: 0; padding: 2mm; font-size: 10px; line-height: 1.2; }
-                        .center { text-align: center; }
-                        .bold { font-weight: bold; }
-                        .border-top { border-top: 1px dashed #000; margin-top: 2mm; padding-top: 2mm; }
-                        .flex { display: flex; justify-content: space-between; }
-                        .mt-1 { margin-top: 1mm; }
-                      </style>
-                    </head>
-                    <body>
-                      <div class="center bold">${settings?.church_name || 'CSI CHURCH'}</div>
-                      <div class="center">TOP CONTRIBUTORS</div>
-                      <div class="center" style="font-size: 8px;">${new Date().toLocaleDateString()}</div>
-                      
-                      <div class="border-top mt-1">
-                        ${filteredContributors.slice(0, 10).map((c, i) => `
-                          <div class="flex mt-1" style="font-size: 8px;">
-                            <span>${i + 1}. ${c.name.substring(0, 12)}</span>
-                            <span>₹${c.total_contribution.toLocaleString()}</span>
-                          </div>
-                        `).join('')}
-                      </div>
+              printThermal(`
+                <html>
+                  <head>
+                    <title>Top Contributors - Thermal</title>
+                    <style>
+                      @page { margin: 0; }
+                      body { font-family: 'Courier New', Courier, monospace; width: 48mm; margin: 0; padding: 2mm; font-size: 10px; line-height: 1.2; }
+                      .center { text-align: center; }
+                      .bold { font-weight: bold; }
+                      .border-top { border-top: 1px dashed #000; margin-top: 2mm; padding-top: 2mm; }
+                      .flex { display: flex; justify-content: space-between; }
+                      .mt-1 { margin-top: 1mm; }
+                    </style>
+                  </head>
+                  <body>
+                    <div class="center bold">${settings?.church_name || 'CSI CHURCH'}</div>
+                    <div class="center">TOP CONTRIBUTORS</div>
+                    <div class="center" style="font-size: 8px;">${new Date().toLocaleDateString()}</div>
+                    
+                    <div class="border-top mt-1">
+                      ${filteredContributors.slice(0, 10).map((c, i) => `
+                        <div class="flex mt-1" style="font-size: 8px;">
+                          <span>${i + 1}. ${c.name.substring(0, 12)}</span>
+                          <span>₹${c.total_contribution.toLocaleString()}</span>
+                        </div>
+                      `).join('')}
+                    </div>
 
-                      <div class="border-top center mt-1" style="font-size: 8px; font-style: italic;">
-                        ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
-                      </div>
-                      <script>window.onload = () => { window.print(); setTimeout(() => window.close(), 500); };</script>
-                    </body>
-                  </html>
-                `);
-                printWindow.document.close();
-              }
+                    <div class="border-top center mt-1" style="font-size: 8px; font-style: italic;">
+                      ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
+                    </div>
+                  </body>
+                </html>
+              `);
             }}
             className="p-2 text-orange-600 hover:bg-orange-50 rounded-lg transition-colors border border-orange-200 flex items-center space-x-2"
             title="Thermal Print Top 10"
@@ -3367,7 +3816,7 @@ const IncomeAnalysis = () => {
           </div>
         </div>
 
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto hidden md:block">
           <table className="w-full text-left border-collapse">
             <thead>
               <tr className="bg-slate-50">
@@ -3408,6 +3857,32 @@ const IncomeAnalysis = () => {
               ))}
             </tbody>
           </table>
+        </div>
+
+        {/* Mobile View */}
+        <div className="md:hidden divide-y divide-slate-100">
+          {filteredContributors.map((c, index) => (
+            <div key={c.id} className="p-4 flex items-center justify-between">
+              <div className="flex items-center space-x-4">
+                <span className={`inline-flex items-center justify-center w-8 h-8 rounded-full text-xs font-black ${
+                  index === 0 ? 'bg-yellow-100 text-yellow-700' : 
+                  index === 1 ? 'bg-slate-200 text-slate-700' :
+                  index === 2 ? 'bg-orange-100 text-orange-700' :
+                  'bg-slate-100 text-slate-500'
+                }`}>
+                  {index + 1}
+                </span>
+                <div className="flex flex-col">
+                  <span className="text-sm font-black text-slate-800 uppercase tracking-tight">{c.name}</span>
+                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{c.member_code}</span>
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-base font-black text-indigo-600 tracking-tighter">₹{c.total_contribution.toLocaleString()}</div>
+                <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{c.transaction_count} TXS</div>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </div>
@@ -3550,7 +4025,7 @@ const SettingsPage = () => {
   };
 
   return (
-    <div className="p-8 max-w-2xl space-y-8 pb-20">
+    <div className="p-4 md:p-8 max-w-2xl space-y-8 pb-20">
       <div className="bg-white p-6 rounded-2xl border border-slate-200 space-y-6 shadow-sm">
         <h3 className="text-lg font-bold text-slate-800 border-b border-slate-100 pb-4">{t('church_profile')}</h3>
         <div className="space-y-4">
@@ -4349,9 +4824,6 @@ const CashCounterPage = () => {
   };
 
   const handlePrint = () => {
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) return;
-
     const rows = denominations.map(d => `
       <tr>
         <td style="border: 1px solid #ddd; padding: 12px; text-align: center;">₹${d}</td>
@@ -4360,7 +4832,7 @@ const CashCounterPage = () => {
       </tr>
     `).join('');
 
-    printWindow.document.write(`
+    printThermal(`
       <html>
         <head>
           <title>Cash Counter - ${settings?.church_name || 'CSI CMS'}</title>
@@ -4398,17 +4870,12 @@ const CashCounterPage = () => {
           <div style="margin-top: 50px; text-align: center; border-top: 1px solid #eee; padding-top: 20px;">
             <p style="font-style: italic; color: #666; font-size: 14px;">${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}</p>
           </div>
-          <script>window.print();</script>
         </body>
       </html>
     `);
-    printWindow.document.close();
   };
 
   const handleThermalPrint = () => {
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) return;
-
     const rows = denominations.filter(d => counts[d] > 0).map(d => `
       <div class="flex mt-1">
         <span>₹${d} x ${counts[d]}</span>
@@ -4416,7 +4883,7 @@ const CashCounterPage = () => {
       </div>
     `).join('');
 
-    printWindow.document.write(`
+    printThermal(`
       <html>
         <head>
           <title>Cash Counter - Thermal</title>
@@ -4445,11 +4912,9 @@ const CashCounterPage = () => {
           <div class="border-top center mt-1" style="font-size: 8px; font-style: italic;">
             ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
           </div>
-          <script>window.onload = () => { window.print(); setTimeout(() => window.close(), 500); };</script>
         </body>
       </html>
     `);
-    printWindow.document.close();
   };
 
   return (
@@ -4685,6 +5150,69 @@ const SuperAdminDashboard = () => {
     }
   };
 
+  const handlePrintSummary = () => {
+    const tableRows = churches.map(c => `
+      <tr>
+        <td style="border: 1px solid #ddd; padding: 8px;">${c.name}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">${c.location}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">${c.admin_name}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">${c.subscription_plan}</td>
+        <td style="border: 1px solid #ddd; padding: 8px; text-transform: uppercase;">${c.status}</td>
+      </tr>
+    `).join('');
+
+    printThermal(`
+      <html>
+        <head>
+          <title>Church List Summary - Super Admin</title>
+          <style>
+            body { font-family: sans-serif; padding: 20px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+            th { background-color: #f2f2f2; text-align: left; border: 1px solid #ddd; padding: 8px; }
+            h1 { text-align: center; color: #4f46e5; }
+            .stats { display: flex; justify-content: space-around; margin-bottom: 20px; background: #f9fafb; padding: 15px; border-radius: 8px; }
+            .stat-item { text-align: center; }
+            .stat-value { font-size: 20px; font-bold: true; color: #4f46e5; }
+          </style>
+        </head>
+        <body>
+          <h1>Super Admin - Church Network Summary</h1>
+          <p style="text-align: center;">Generated on: ${new Date().toLocaleString()}</p>
+          
+          <div class="stats">
+            <div class="stat-item">
+              <div class="stat-label">Total Churches</div>
+              <div class="stat-value">${stats.totalChurches}</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">Active Churches</div>
+              <div class="stat-value">${stats.activeChurches}</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-label">Total Users</div>
+              <div class="stat-value">${stats.totalUsers}</div>
+            </div>
+          </div>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Church Name</th>
+                <th>Location</th>
+                <th>Admin</th>
+                <th>Plan</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${tableRows || '<tr><td colspan="5" style="text-align: center; padding: 20px;">No churches found</td></tr>'}
+            </tbody>
+          </table>
+        </body>
+      </html>
+    `);
+  };
+
   if (loading && churches.length === 0) return (
     <div className="p-8 text-center space-y-4">
       <RefreshCw className="w-8 h-8 animate-spin mx-auto text-indigo-600" />
@@ -4693,11 +5221,19 @@ const SuperAdminDashboard = () => {
   );
 
   return (
-    <div className="p-8 space-y-8">
-      <div className="flex justify-between items-center">
+    <div className="p-4 md:p-8 space-y-8">
+      <div className="flex flex-col md:flex-row justify-between md:items-center gap-6">
         <div>
           <div className="flex items-center gap-3">
             <h1 className="text-3xl font-black text-slate-800 uppercase tracking-tight">Super Admin Dashboard</h1>
+            <button 
+              onClick={handlePrintSummary}
+              className="p-2 text-indigo-600 hover:bg-indigo-50 rounded-xl transition-colors border border-indigo-200 flex items-center space-x-2"
+              title="Print Summary"
+            >
+              <Printer size={20} />
+              <span className="text-sm font-bold">Print</span>
+            </button>
             <div className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-tighter flex items-center gap-1 ${
               healthStatus === 'ok' ? 'bg-emerald-100 text-emerald-700' : 
               healthStatus === 'error' ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'
@@ -5239,7 +5775,7 @@ const SuperAdminSettings = () => {
   if (loading) return <div className="p-8 text-center">Loading Settings...</div>;
 
   return (
-    <div className="p-8 max-w-4xl mx-auto space-y-8">
+    <div className="p-4 md:p-8 max-w-4xl mx-auto space-y-8">
       <div>
         <h1 className="text-3xl font-black text-slate-800 uppercase tracking-tight">Super Admin Settings</h1>
         <p className="text-slate-500 font-medium">Manage your profile and account security</p>
@@ -5398,9 +5934,6 @@ const ReportsPage = () => {
   });
 
   const handlePrint = () => {
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) return;
-
     const tableRows = filtered.map(tx => `
       <tr>
         <td style="border: 1px solid #ddd; padding: 8px;">${tx.invoice_no}</td>
@@ -5431,7 +5964,7 @@ const ReportsPage = () => {
     const totalExpense = filtered.filter(tx => tx.type === 'expense').reduce((sum, tx) => sum + tx.amount, 0);
     const totalCorrection = filteredCorrections.reduce((sum, c) => sum + c.amount, 0);
 
-    printWindow.document.write(`
+    printThermal(`
       <html>
         <head>
           <title>Financial Report - ${settings?.church_name || 'CSI CMS'}</title>
@@ -5501,11 +6034,9 @@ const ReportsPage = () => {
           <div style="margin-top: 40px; text-align: center; border-top: 1px solid #eee; padding-top: 20px;">
             <p style="font-style: italic; color: #666; font-size: 14px;">${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}</p>
           </div>
-          <script>window.print();</script>
         </body>
       </html>
     `);
-    printWindow.document.close();
   };
 
   const handleShare = () => {
@@ -5536,7 +6067,7 @@ const ReportsPage = () => {
   const categories = Array.from(new Set(txs.map(tx => tx.category)));
 
   return (
-    <div className="p-8 space-y-6">
+    <div className="p-4 md:p-8 space-y-6">
       <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-wrap gap-4 items-end">
         <div className="space-y-1">
           <label className="text-xs font-bold text-slate-500 uppercase">{t('date')} (Start)</label>
@@ -5558,43 +6089,38 @@ const ReportsPage = () => {
         <div className="flex space-x-2 ml-auto">
           <button 
             onClick={() => {
-              const printWindow = window.open('', '_blank');
-              if (printWindow) {
-                printWindow.document.write(`
-                  <html>
-                    <head>
-                      <title>Financial Report - Thermal</title>
-                      <style>
-                        @page { margin: 0; }
-                        body { font-family: 'Courier New', Courier, monospace; width: 48mm; margin: 0; padding: 2mm; font-size: 10px; line-height: 1.2; }
-                        .center { text-align: center; }
-                        .bold { font-weight: bold; }
-                        .border-top { border-top: 1px dashed #000; margin-top: 2mm; padding-top: 2mm; }
-                        .flex { display: flex; justify-content: space-between; }
-                        .mt-1 { margin-top: 1mm; }
-                      </style>
-                    </head>
-                    <body>
-                      <div class="center bold">${settings?.church_name || 'CSI CHURCH'}</div>
-                      <div class="center">FINANCIAL REPORT</div>
-                      <div class="center" style="font-size: 8px;">${filter.start || 'Start'} - ${filter.end || 'End'}</div>
-                      
-                      <div class="border-top mt-1">
-                        <div class="flex"><span>INCOME:</span> <span class="bold">₹${totalIncome.toLocaleString()}</span></div>
-                        <div class="flex"><span>EXPENSE:</span> <span class="bold">₹${totalExpense.toLocaleString()}</span></div>
-                        <div class="flex"><span>CORR:</span> <span class="bold">${totalCorrection >= 0 ? '+' : ''}₹${totalCorrection.toLocaleString()}</span></div>
-                        <div class="flex mt-1"><span>NET BAL:</span> <span class="bold">₹${netBalance.toLocaleString()}</span></div>
-                      </div>
+              printThermal(`
+                <html>
+                  <head>
+                    <title>Financial Report - Thermal</title>
+                    <style>
+                      @page { margin: 0; }
+                      body { font-family: 'Courier New', Courier, monospace; width: 48mm; margin: 0; padding: 2mm; font-size: 10px; line-height: 1.2; }
+                      .center { text-align: center; }
+                      .bold { font-weight: bold; }
+                      .border-top { border-top: 1px dashed #000; margin-top: 2mm; padding-top: 2mm; }
+                      .flex { display: flex; justify-content: space-between; }
+                      .mt-1 { margin-top: 1mm; }
+                    </style>
+                  </head>
+                  <body>
+                    <div class="center bold">${settings?.church_name || 'CSI CHURCH'}</div>
+                    <div class="center">FINANCIAL REPORT</div>
+                    <div class="center" style="font-size: 8px;">${filter.start || 'Start'} - ${filter.end || 'End'}</div>
+                    
+                    <div class="border-top mt-1">
+                      <div class="flex"><span>INCOME:</span> <span class="bold">₹${totalIncome.toLocaleString()}</span></div>
+                      <div class="flex"><span>EXPENSE:</span> <span class="bold">₹${totalExpense.toLocaleString()}</span></div>
+                      <div class="flex"><span>CORR:</span> <span class="bold">${totalCorrection >= 0 ? '+' : ''}₹${totalCorrection.toLocaleString()}</span></div>
+                      <div class="flex mt-1"><span>NET BAL:</span> <span class="bold">₹${netBalance.toLocaleString()}</span></div>
+                    </div>
 
-                      <div class="border-top center mt-1" style="font-size: 8px; font-style: italic;">
-                        ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
-                      </div>
-                      <script>window.onload = () => { window.print(); setTimeout(() => window.close(), 500); };</script>
-                    </body>
-                  </html>
-                `);
-                printWindow.document.close();
-              }
+                    <div class="border-top center mt-1" style="font-size: 8px; font-style: italic;">
+                      ${BIBLE_VERSES[Math.floor(Math.random() * BIBLE_VERSES.length)]}
+                    </div>
+                  </body>
+                </html>
+              `);
             }}
             className="bg-orange-500 text-white px-4 py-2 rounded-lg font-bold flex items-center space-x-2 hover:bg-orange-600 transition-colors"
           >
@@ -5631,7 +6157,7 @@ const ReportsPage = () => {
         </div>
       </div>
 
-      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm print:shadow-none print:border-none">
+      <div className="bg-white rounded-xl border border-slate-200 overflow-x-auto shadow-sm print:shadow-none print:border-none">
         <table className="w-full text-left">
           <thead className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wider">
             <tr>
